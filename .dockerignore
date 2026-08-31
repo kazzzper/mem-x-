@@ -1,0 +1,24 @@
+# Version control
+.git
+.gitignore
+AGENTS.md
+agents/
+guidelines.md
+
+# Go build artifacts
+bin/
+dist/
+*.exe
+mem-x
+memx-cli
+memx-url
+
+# Test / dev caches
+.gocache/
+.gomodcache/
+*.test
+coverage.*
+
+# Local docs already copied via COPY . ., keep this lean
+docs/
+*.log

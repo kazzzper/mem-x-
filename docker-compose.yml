@@ -1,0 +1,52 @@
+# docker compose up -d           → start mem-x
+# docker compose logs -f         → follow logs
+# docker compose exec memx memx-url         → print the connection URL
+# docker compose exec memx memx-cli PING    → quick smoke test
+#
+# Configuration via a .env file next to this file (or shell env):
+#   MEMX_PORT=6379
+#   MEMX_PASSWORD=secret
+#   MEMX_TLS=0
+#   MEMX_AOF=/data/appendonly.aof
+#
+# The same variables drive both the server and the URL printed by memx-url
+# (inside the container), so the connection string always matches the running
+# configuration — port, password, and TLS scheme stay in sync automatically.
+#
+# TLS mode: set MEMX_TLS=1, MEMX_TLS_CERT/MEMX_TLS_KEY to paths inside the
+# container, and mount the cert files (see the commented volume below). For
+# self-signed certs, connect with `memx-cli -tls-skip-verify <memxs://url>`.
+
+services:
+  memx:
+    build: .
+    image: mem-x:latest
+    container_name: memx
+    restart: unless-stopped
+    environment:
+      # Server listen address + URL builder read these (all optional).
+      MEMX_ADDR: ":${MEMX_PORT:-6379}"
+      MEMX_PORT: "${MEMX_PORT:-6379}"
+      MEMX_PASSWORD: "${MEMX_PASSWORD:-}"
+      MEMX_TLS: "${MEMX_TLS:-0}"
+      MEMX_TLS_CERT: "${MEMX_TLS_CERT:-}"
+      MEMX_TLS_KEY: "${MEMX_TLS_KEY:-}"
+      MEMX_AOF: "${MEMX_AOF:-/data/appendonly.aof}"
+      MEMX_APPENDFSYNC: "${MEMX_APPENDFSYNC:-everysec}"
+      MEMX_LOG_LEVEL: "${MEMX_LOG_LEVEL:-info}"
+    ports:
+      - "${MEMX_PORT:-6379}:${MEMX_PORT:-6379}"
+    volumes:
+      - memx-data:/data
+      # TLS: mount your certs read-only and point MEMX_TLS_CERT/KEY at them.
+      # - ${MEMX_CERT_DIR:-./certs}:/certs:ro
+    healthcheck:
+      # Build the URL from the same env the server uses, then PING it.
+      test: ["CMD-SHELL", "url=$$(memx-url); if [ \"${MEMX_TLS_SKIP_VERIFY:-0}\" = \"1\" ]; then exec memx-cli -tls-skip-verify \"$$url\" PING; else exec memx-cli \"$$url\" PING; fi"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  memx-data:
