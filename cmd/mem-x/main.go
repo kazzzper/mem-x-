@@ -22,6 +22,7 @@ func main() {
 	flag.StringVar(&cfg.Addr, "addr", cfg.Addr, "TCP listen address")
 	flag.IntVar(&cfg.MaxConn, "max-conn", cfg.MaxConn, "max concurrent client connections")
 	flag.IntVar(&cfg.MaxBulkLen, "max-bulk-len", cfg.MaxBulkLen, "max bulk string length in bytes")
+	flag.Int64Var(&cfg.MaxValueLen, "max-value-len", cfg.MaxValueLen, "max stored value size in bytes")
 	flag.IntVar(&cfg.MaxArgs, "max-args", cfg.MaxArgs, "max elements per command")
 	flag.IntVar(&cfg.MaxInlineLen, "max-inline-len", cfg.MaxInlineLen, "max inline command length in bytes")
 	flag.DurationVar(&cfg.IdleTimeout, "idle-timeout", cfg.IdleTimeout, "client idle timeout (0 = none)")
