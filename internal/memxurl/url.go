@@ -29,6 +29,13 @@ type URL struct {
 	TLS      bool // true for memxs://
 }
 
+// IsURL reports whether s looks like a memx:// or memxs:// connection URL
+// (case-insensitive scheme).
+func IsURL(s string) bool {
+	lower := strings.ToLower(s)
+	return strings.HasPrefix(lower, "memx://") || strings.HasPrefix(lower, "memxs://")
+}
+
 // Parse parses a memx:// or memxs:// URL and returns its components.
 // An error is returned for unsupported schemes or malformed URLs.
 func Parse(rawURL string) (*URL, error) {
