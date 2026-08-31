@@ -291,3 +291,93 @@ func (r Reply) WriteTo(w *Writer) error {
 	}
 	return perr("unknown reply kind")
 }
+
+// ReadReply reads one RESP reply from br and decodes it into a Reply. It is
+// the decoder complement to Reply.WriteTo — used by the CLI and integration
+// tests to consume server replies. Reads are bounded by lim so a hostile
+// reply cannot force unbounded allocation.
+func ReadReply(br *bufio.Reader, lim Limits) (Reply, error) {
+	b, err := br.Peek(1)
+	if err != nil {
+		return Reply{}, err
+	}
+	switch b[0] {
+	case '+', '-':
+		line, err := readLine(br, lim.MaxInlineLen, "simple/error line")
+		if err != nil {
+			return Reply{}, err
+		}
+		if len(line) == 0 {
+			return Reply{}, perr("invalid empty reply")
+		}
+		msg := append([]byte(nil), line[1:]...) // strip the type prefix
+		if b[0] == '+' {
+			return Reply{Kind: Simple, Str: msg}, nil
+		}
+		return Reply{Kind: RError, Str: msg}, nil
+	case ':':
+		line, err := readLine(br, lim.MaxHeaderLen, "integer")
+		if err != nil {
+			return Reply{}, err
+		}
+		if len(line) < 2 {
+			return Reply{}, perr("invalid integer reply")
+		}
+		n, err := strconv.ParseInt(string(line[1:]), 10, 64)
+		if err != nil {
+			return Reply{}, perr("invalid integer reply")
+		}
+		return Reply{Kind: RInteger, Int: n}, nil
+	case '$':
+		return readBulkReply(br, lim)
+	case '*':
+		return readArrayReply(br, lim)
+	default:
+		return Reply{}, perr("invalid reply type")
+	}
+}
+
+func readBulkReply(br *bufio.Reader, lim Limits) (Reply, error) {
+	line, err := readLine(br, lim.MaxHeaderLen, "bulk length")
+	if err != nil {
+		return Reply{}, err
+	}
+	blen, err := strconv.Atoi(string(line[1:]))
+	if err != nil || blen < -1 || blen > lim.MaxBulkLen {
+		return Reply{}, perr("invalid bulk length")
+	}
+	if blen == -1 {
+		return Reply{Kind: NullBulk}, nil
+	}
+	buf := make([]byte, blen+2)
+	if _, err := io.ReadFull(br, buf); err != nil {
+		return Reply{}, err
+	}
+	if buf[blen] != '\r' || buf[blen+1] != '\n' {
+		return Reply{}, perr("invalid bulk terminator")
+	}
+	return Reply{Kind: Bulk, Str: buf[:blen]}, nil
+}
+
+func readArrayReply(br *bufio.Reader, lim Limits) (Reply, error) {
+	line, err := readLine(br, lim.MaxHeaderLen, "array length")
+	if err != nil {
+		return Reply{}, err
+	}
+	n, err := strconv.Atoi(string(line[1:]))
+	if err != nil || n < -1 || n > lim.MaxArgs {
+		return Reply{}, perr("invalid array length")
+	}
+	if n == -1 {
+		return Reply{Kind: NullBulk}, nil // RESP2 null array is not produced; treat as null
+	}
+	arr := make([]Reply, 0, n)
+	for i := 0; i < n; i++ {
+		el, err := ReadReply(br, lim)
+		if err != nil {
+			return Reply{}, err
+		}
+		arr = append(arr, el)
+	}
+	return Reply{Kind: RArray, Array: arr}, nil
+}

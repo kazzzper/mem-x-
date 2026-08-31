@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -323,4 +324,203 @@ func TestConcurrent(t *testing.T) {
 		}(g)
 	}
 	wg.Wait()
+}
+
+func TestKeys(t *testing.T) {
+	s, f := newTest(t)
+	s.Set([]byte("user:1"), []byte("a"), 0, SetAlways)
+	s.Set([]byte("user:2"), []byte("b"), 0, SetAlways)
+	s.Set([]byte("admin:1"), []byte("c"), 0, SetAlways)
+	s.Set([]byte("ephemeral"), []byte("d"), time.Second, SetAlways)
+	f.advance(2 * time.Second)
+
+	got := s.Keys("*")
+	if len(got) != 3 {
+		t.Fatalf("Keys(*) = %v, want 3 live keys", got)
+	}
+	got = s.Keys("user:*")
+	if len(got) != 2 {
+		t.Fatalf("Keys(user:*) = %v, want 2", got)
+	}
+	if got := s.Keys("nope*"); len(got) != 0 {
+		t.Fatalf("Keys(nope*) = %v, want 0", got)
+	}
+}
+
+func TestScan(t *testing.T) {
+	s, f := newTest(t)
+	const n = 25
+	for i := 0; i < n; i++ {
+		s.Set([]byte(fmt.Sprintf("key:%02d", i)), []byte("v"), 0, SetAlways)
+	}
+	s.Set([]byte("other"), []byte("v"), time.Second, SetAlways)
+	f.advance(2 * time.Second) // other expires
+
+	// Full iteration must return every live key exactly once (scan is
+	// per-shard, so no duplicates within a pass).
+	cursor, count := 0, 5
+	seen := map[string]bool{}
+	passes := 0
+	for {
+		var batch []string
+		cursor, batch = s.Scan(cursor, count, "key:*")
+		for _, k := range batch {
+			if seen[k] {
+				t.Fatalf("duplicate key %q returned", k)
+			}
+			seen[k] = true
+		}
+		passes++
+		if cursor == 0 {
+			break
+		}
+		if passes > len(s.shards)+2 {
+			t.Fatalf("scan did not terminate; seen %d keys", len(seen))
+		}
+	}
+	if len(seen) != n {
+		t.Fatalf("scan returned %d keys, want %d", len(seen), n)
+	}
+}
+
+func TestScanEmptyPattern(t *testing.T) {
+	s, _ := newTest(t)
+	s.Set([]byte("a"), []byte("1"), 0, SetAlways)
+	s.Set([]byte("b"), []byte("2"), 0, SetAlways)
+	cursor := 0
+	var all []string
+	for {
+		var batch []string
+		cursor, batch = s.Scan(cursor, 1, "")
+		all = append(all, batch...)
+		if cursor == 0 {
+			break
+		}
+	}
+	if len(all) != 2 {
+		t.Fatalf("Scan('') = %v, want 2 keys", all)
+	}
+}
+
+func TestGetSet(t *testing.T) {
+	s, _ := newTest(t)
+	if old, ok := s.GetSet([]byte("k"), []byte("v1")); ok || old != nil {
+		t.Fatalf("GetSet on missing key = (%q,%v), want (nil,false)", old, ok)
+	}
+	if v, _ := s.Get([]byte("k")); string(v) != "v1" {
+		t.Fatalf("after GetSet, Get = %q, want v1", v)
+	}
+	old, ok := s.GetSet([]byte("k"), []byte("v2"))
+	if !ok || string(old) != "v1" {
+		t.Fatalf("GetSet = (%q,%v), want (v1,true)", old, ok)
+	}
+	if v, _ := s.Get([]byte("k")); string(v) != "v2" {
+		t.Fatalf("after second GetSet, Get = %q, want v2", v)
+	}
+}
+
+func TestGetSetClearsTTL(t *testing.T) {
+	s, f := newTest(t)
+	s.Set([]byte("k"), []byte("v1"), 50*time.Millisecond, SetAlways)
+	f.advance(30 * time.Millisecond)
+	s.GetSet([]byte("k"), []byte("v2"))
+	f.advance(40 * time.Millisecond) // past original deadline
+	if _, ok := s.Get([]byte("k")); !ok {
+		t.Fatal("GETSET must clear the previous TTL (key should still be live)")
+	}
+}
+
+func TestSetNXMulti(t *testing.T) {
+	s, _ := newTest(t)
+	pairs := [][2][]byte{{[]byte("a"), []byte("1")}, {[]byte("b"), []byte("2")}, {[]byte("c"), []byte("3")}}
+	if !s.SetNXMulti(pairs) {
+		t.Fatal("SetNXMulti on empty store should succeed")
+	}
+	if s.Len() != 3 {
+		t.Fatalf("Len = %d, want 3", s.Len())
+	}
+	// Second call with one existing key must be a no-op.
+	other := [][2][]byte{{[]byte("d"), []byte("4")}, {[]byte("a"), []byte("9")}}
+	if s.SetNXMulti(other) {
+		t.Fatal("SetNXMulti with an existing key must not write")
+	}
+	if _, ok := s.Get([]byte("d")); ok {
+		t.Fatal("d must not exist after failed SetNXMulti")
+	}
+	if v, _ := s.Get([]byte("a")); string(v) != "1" {
+		t.Fatalf("a = %q, want 1 (untouched)", v)
+	}
+}
+
+func TestSetNXMultiExpiredAborts(t *testing.T) {
+	s, f := newTest(t)
+	s.Set([]byte("a"), []byte("old"), time.Second, SetAlways)
+	f.advance(2 * time.Second) // a expires
+	// Expired key is treated as absent, so the batch should succeed.
+	if !s.SetNXMulti([][2][]byte{{[]byte("a"), []byte("new")}, {[]byte("b"), []byte("2")}}) {
+		t.Fatal("SetNXMulti should succeed when existing key is expired")
+	}
+	if v, _ := s.Get([]byte("a")); string(v) != "new" {
+		t.Fatalf("a = %q, want new", v)
+	}
+}
+
+func TestExpireAt(t *testing.T) {
+	s, f := newTest(t)
+	now := f.Now().Unix()
+	if s.ExpireAt([]byte("missing"), now+10) {
+		t.Fatal("ExpireAt on missing key should return false")
+	}
+	s.Set([]byte("k"), []byte("v"), 0, SetAlways)
+	if !s.ExpireAt([]byte("k"), now+1) {
+		t.Fatal("ExpireAt should return true for an existing key")
+	}
+	f.advance(2 * time.Second)
+	if _, ok := s.Get([]byte("k")); ok {
+		t.Fatal("key should be expired after its EXPIREAT deadline")
+	}
+}
+
+func TestExpireAtPast(t *testing.T) {
+	s, f := newTest(t)
+	s.Set([]byte("k"), []byte("v"), 0, SetAlways)
+	if !s.ExpireAt([]byte("k"), f.Now().Unix()-10) {
+		t.Fatal("EXPIREAT in the past on an existing key should delete it and return true")
+	}
+	if _, ok := s.Get([]byte("k")); ok {
+		t.Fatal("key should be gone after past EXPIREAT")
+	}
+	if s.Len() != 0 {
+		t.Fatalf("Len = %d, want 0", s.Len())
+	}
+}
+
+func TestPersist(t *testing.T) {
+	s, f := newTest(t)
+	if s.Persist([]byte("missing")) {
+		t.Fatal("Persist on missing key should return false")
+	}
+	s.Set([]byte("k"), []byte("v"), 0, SetAlways)
+	if s.Persist([]byte("k")) {
+		t.Fatal("Persist on a key without TTL should return false")
+	}
+	s.Set([]byte("k2"), []byte("v"), time.Second, SetAlways)
+	if !s.Persist([]byte("k2")) {
+		t.Fatal("Persist on a key with TTL should return true")
+	}
+	f.advance(2 * time.Second)
+	if _, ok := s.Get([]byte("k2")); !ok {
+		t.Fatal("key should survive past its old deadline after PERSIST")
+	}
+}
+
+func TestKeysExpiredExcluded(t *testing.T) {
+	s, f := newTest(t)
+	s.Set([]byte("live"), []byte("v"), 0, SetAlways)
+	s.Set([]byte("dead"), []byte("v"), time.Second, SetAlways)
+	f.advance(2 * time.Second)
+	got := s.Keys("*")
+	if len(got) != 1 || got[0] != "live" {
+		t.Fatalf("Keys(*) = %v, want [live]", got)
+	}
 }

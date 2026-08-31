@@ -67,6 +67,19 @@ func New(st *store.Store, stats *Stats) *Registry {
 	r.register(Command{Name: "info", MinArgs: 0, MaxArgs: 0, Handler: r.hInfo})
 	r.register(Command{Name: "command", MinArgs: 0, MaxArgs: 0, Handler: r.hCommand})
 	r.register(Command{Name: "client", MinArgs: 1, MaxArgs: -1, Handler: r.hClient})
+	r.register(Command{Name: "mget", MinArgs: 1, MaxArgs: -1, Handler: r.hMGet})
+	r.register(Command{Name: "mset", MinArgs: 2, MaxArgs: -1, Handler: r.hMSet})
+	r.register(Command{Name: "msetnx", MinArgs: 2, MaxArgs: -1, Handler: r.hMSetNX})
+	r.register(Command{Name: "getset", MinArgs: 2, MaxArgs: 2, Handler: r.hGetSet})
+	r.register(Command{Name: "setnx", MinArgs: 2, MaxArgs: 2, Handler: r.hSetNX})
+	r.register(Command{Name: "strlen", MinArgs: 1, MaxArgs: 1, Handler: r.hStrLen})
+	r.register(Command{Name: "incrby", MinArgs: 2, MaxArgs: 2, Handler: r.hIncrBy})
+	r.register(Command{Name: "decrby", MinArgs: 2, MaxArgs: 2, Handler: r.hDecrBy})
+	r.register(Command{Name: "expireat", MinArgs: 2, MaxArgs: 2, Handler: r.hExpireAt})
+	r.register(Command{Name: "pexpire", MinArgs: 2, MaxArgs: 2, Handler: r.hPExpire})
+	r.register(Command{Name: "persist", MinArgs: 1, MaxArgs: 1, Handler: r.hPersist})
+	r.register(Command{Name: "keys", MinArgs: 1, MaxArgs: 1, Handler: r.hKeys})
+	r.register(Command{Name: "scan", MinArgs: 1, MaxArgs: -1, Handler: r.hScan})
 	return r
 }
 
@@ -298,4 +311,191 @@ func (r *Registry) hClient(ctx context.Context, args [][]byte) (resp.Reply, erro
 	default:
 		return resp.Reply{}, fmt.Errorf("unknown subcommand '%s' for 'client' command", string(args[0]))
 	}
+}
+
+// hMGet returns the values for all keys, using null for missing ones. Redis:
+// "Returns the values of all specified keys."
+func (r *Registry) hMGet(ctx context.Context, args [][]byte) (resp.Reply, error) {
+	out := make([]resp.Reply, len(args))
+	for i, k := range args {
+		if v, ok := r.store.Get(k); ok {
+			out[i] = resp.BulkReply(v)
+		} else {
+			out[i] = resp.NullReply()
+		}
+	}
+	return resp.ArrayReply(out), nil
+}
+
+// hMSet sets multiple key/value pairs atomically? No — MSET is NOT atomic in
+// Redis; each pair is set independently. Returns OK. Arguments are
+// key1 value1 key2 value2 ... so the count must be even.
+func (r *Registry) hMSet(ctx context.Context, args [][]byte) (resp.Reply, error) {
+	if len(args)%2 != 0 {
+		return resp.Reply{}, errors.New("wrong number of arguments for 'mset' command")
+	}
+	for i := 0; i < len(args); i += 2 {
+		r.store.Set(args[i], args[i+1], 0, store.SetAlways)
+	}
+	return resp.SimpleReply("OK"), nil
+}
+
+// hMSetNX sets all pairs only if none of the keys exist (atomic, MSETNX
+// semantics). Returns 1 on success, 0 if any key already existed.
+func (r *Registry) hMSetNX(ctx context.Context, args [][]byte) (resp.Reply, error) {
+	if len(args)%2 != 0 {
+		return resp.Reply{}, errors.New("wrong number of arguments for 'msetnx' command")
+	}
+	pairs := make([][2][]byte, 0, len(args)/2)
+	for i := 0; i < len(args); i += 2 {
+		pairs = append(pairs, [2][]byte{args[i], args[i+1]})
+	}
+	if r.store.SetNXMulti(pairs) {
+		return resp.IntegerReply(1), nil
+	}
+	return resp.IntegerReply(0), nil
+}
+
+// hGetSet atomically sets key to value and returns the previous value (null
+// when the key did not exist). Redis GETSET semantics.
+func (r *Registry) hGetSet(ctx context.Context, args [][]byte) (resp.Reply, error) {
+	old, ok := r.store.GetSet(args[0], args[1])
+	if !ok {
+		return resp.NullReply(), nil
+	}
+	return resp.BulkReply(old), nil
+}
+
+// hSetNX sets key to value only if it does not exist. Returns 1 if set, 0 if
+// the key already existed (Redis SETNX semantics; the TTL-less form).
+func (r *Registry) hSetNX(ctx context.Context, args [][]byte) (resp.Reply, error) {
+	if r.store.Set(args[0], args[1], 0, store.SetNX) {
+		return resp.IntegerReply(1), nil
+	}
+	return resp.IntegerReply(0), nil
+}
+
+// hStrLen returns the byte length of the value at key, or 0 when missing.
+func (r *Registry) hStrLen(ctx context.Context, args [][]byte) (resp.Reply, error) {
+	if v, ok := r.store.Get(args[0]); ok {
+		return resp.IntegerReply(int64(len(v))), nil
+	}
+	return resp.IntegerReply(0), nil
+}
+
+// hIncrBy increments the integer at key by delta and returns the new value.
+func (r *Registry) hIncrBy(ctx context.Context, args [][]byte) (resp.Reply, error) {
+	delta, err := strconv.ParseInt(string(args[1]), 10, 64)
+	if err != nil {
+		return resp.Reply{}, errors.New("value is not an integer or out of range")
+	}
+	n, err := r.store.IncrBy(args[0], delta)
+	if err != nil {
+		return resp.Reply{}, err
+	}
+	return resp.IntegerReply(n), nil
+}
+
+// hDecrBy decrements the integer at key by delta and returns the new value.
+func (r *Registry) hDecrBy(ctx context.Context, args [][]byte) (resp.Reply, error) {
+	delta, err := strconv.ParseInt(string(args[1]), 10, 64)
+	if err != nil {
+		return resp.Reply{}, errors.New("value is not an integer or out of range")
+	}
+	n, err := r.store.IncrBy(args[0], -delta)
+	if err != nil {
+		return resp.Reply{}, err
+	}
+	return resp.IntegerReply(n), nil
+}
+
+// hExpireAt sets an absolute Unix-seconds expiry on key. Returns 1 if set, 0
+// if the key does not exist (Redis EXPIREAT semantics; a past timestamp
+// deletes the key).
+func (r *Registry) hExpireAt(ctx context.Context, args [][]byte) (resp.Reply, error) {
+	ts, err := strconv.ParseInt(string(args[1]), 10, 64)
+	if err != nil {
+		return resp.Reply{}, errors.New("value is not an integer or out of range")
+	}
+	if r.store.ExpireAt(args[0], ts) {
+		return resp.IntegerReply(1), nil
+	}
+	return resp.IntegerReply(0), nil
+}
+
+// hPExpire sets a millisecond TTL on key. Returns 1 if set, 0 if missing
+// (Redis PEXPIRE semantics; non-positive TTL deletes the key).
+func (r *Registry) hPExpire(ctx context.Context, args [][]byte) (resp.Reply, error) {
+	ms, err := strconv.ParseInt(string(args[1]), 10, 64)
+	if err != nil {
+		return resp.Reply{}, errors.New("value is not an integer or out of range")
+	}
+	if r.store.Expire(args[0], time.Duration(ms)*time.Millisecond) {
+		return resp.IntegerReply(1), nil
+	}
+	return resp.IntegerReply(0), nil
+}
+
+// hPersist removes the TTL from key. Returns 1 if a timeout was removed, 0 if
+// the key has no TTL or does not exist (Redis PERSIST semantics).
+func (r *Registry) hPersist(ctx context.Context, args [][]byte) (resp.Reply, error) {
+	if r.store.Persist(args[0]) {
+		return resp.IntegerReply(1), nil
+	}
+	return resp.IntegerReply(0), nil
+}
+
+// hKeys returns all keys matching the glob pattern. This is a full scan and
+// O(N) over the dataset, matching Redis KEYS semantics.
+func (r *Registry) hKeys(ctx context.Context, args [][]byte) (resp.Reply, error) {
+	keys := r.store.Keys(string(args[0]))
+	out := make([]resp.Reply, len(keys))
+	for i, k := range keys {
+		out[i] = resp.BulkReply([]byte(k))
+	}
+	return resp.ArrayReply(out), nil
+}
+
+// hScan implements cursor-based key iteration (Redis SCAN). Reply is
+// [cursor, [keys...]] where cursor 0 means iteration complete. Optional
+// MATCH <pattern> and COUNT <n> options are honored; COUNT is a hint.
+func (r *Registry) hScan(ctx context.Context, args [][]byte) (resp.Reply, error) {
+	cursor, err := strconv.Atoi(string(args[0]))
+	if err != nil || cursor < 0 {
+		return resp.Reply{}, errors.New("invalid cursor")
+	}
+	pattern := ""
+	count := 10 // Redis default COUNT
+	for i := 1; i < len(args); i++ {
+		switch strings.ToUpper(string(args[i])) {
+		case "MATCH":
+			if i+1 >= len(args) {
+				return resp.Reply{}, errors.New("syntax error")
+			}
+			i++
+			pattern = string(args[i])
+		case "COUNT":
+			if i+1 >= len(args) {
+				return resp.Reply{}, errors.New("syntax error")
+			}
+			i++
+			n, err := strconv.Atoi(string(args[i]))
+			if err != nil || n < 0 {
+				return resp.Reply{}, errors.New("value is not an integer or out of range")
+			}
+			count = n
+		default:
+			return resp.Reply{}, errors.New("syntax error")
+		}
+	}
+	next, keys := r.store.Scan(cursor, count, pattern)
+	keyReplies := make([]resp.Reply, 0, len(keys))
+	for _, k := range keys {
+		keyReplies = append(keyReplies, resp.BulkReply([]byte(k)))
+	}
+	// Redis SCAN reply: [cursor, [key1, key2, ...]]
+	return resp.ArrayReply([]resp.Reply{
+		resp.BulkReply([]byte(strconv.Itoa(next))),
+		resp.ArrayReply(keyReplies),
+	}), nil
 }

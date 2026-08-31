@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -215,5 +216,79 @@ func TestReplyWriteTo(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestReadReplyRoundTrip(t *testing.T) {
+	lim := DefaultLimits()
+	replies := []Reply{
+		SimpleReply("OK"),
+		ErrorReply("ERR bad"),
+		IntegerReply(42),
+		BulkReply([]byte("hello")),
+		NullReply(),
+		ArrayReply([]Reply{IntegerReply(1), BulkReply([]byte("a")), NullReply(), SimpleReply("OK")}),
+		ArrayReply(nil),
+	}
+	for _, want := range replies {
+		var buf bytes.Buffer
+		w := NewWriter(&buf)
+		if err := want.WriteTo(w); err != nil {
+			t.Fatalf("WriteTo: %v", err)
+		}
+		if err := w.Flush(); err != nil {
+			t.Fatalf("Flush: %v", err)
+		}
+		got, err := ReadReply(bufio.NewReader(&buf), lim)
+		if err != nil {
+			t.Fatalf("ReadReply(%q): %v", buf.String(), err)
+		}
+		if got.Kind != want.Kind {
+			t.Errorf("kind = %v, want %v (wire: %q)", got.Kind, want.Kind, buf.String())
+		}
+		switch want.Kind {
+		case Simple, RError, Bulk:
+			if string(got.Str) != string(want.Str) {
+				t.Errorf("Str = %q, want %q", got.Str, want.Str)
+			}
+		case RInteger:
+			if got.Int != want.Int {
+				t.Errorf("Int = %d, want %d", got.Int, want.Int)
+			}
+		case RArray:
+			if len(got.Array) != len(want.Array) {
+				t.Errorf("array len = %d, want %d", len(got.Array), len(want.Array))
+			}
+		}
+	}
+}
+
+func TestReadReplyNullArrayAsBulk(t *testing.T) {
+	// RESP2 has no null array; a *-1 should decode to something non-error.
+	lim := DefaultLimits()
+	got, err := ReadReply(bufio.NewReader(strings.NewReader("*-1\r\n")), lim)
+	if err != nil {
+		t.Fatalf("ReadReply(*-1): %v", err)
+	}
+	if got.Kind != NullBulk {
+		t.Errorf("kind = %v, want NullBulk", got.Kind)
+	}
+}
+
+func TestReadReplyErrors(t *testing.T) {
+	lim := DefaultLimits()
+	cases := []string{
+		"!",                     // unknown type
+		"$abc\r\n",              // bad bulk len
+		"$5\r\nhi\r\n",          // truncated bulk
+		"$3\r\nhell\r\n",        // bad terminator
+		":abc\r\n",              // bad integer
+		"$9999999999999999\r\n", // len overflow
+		"*\r\n",                 // bad array len
+	}
+	for _, wire := range cases {
+		if _, err := ReadReply(bufio.NewReader(strings.NewReader(wire)), lim); err == nil {
+			t.Errorf("ReadReply(%q): expected error, got nil", wire)
+		}
 	}
 }

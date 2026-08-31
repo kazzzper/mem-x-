@@ -1,6 +1,7 @@
 package command_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"strings"
@@ -281,5 +282,251 @@ func TestCaseInsensitive(t *testing.T) {
 	exec(t, reg, "sEt", "k", "v")
 	if got := exec(t, reg, "GeT", "k"); got != "$1\r\nv\r\n" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestMGet(t *testing.T) {
+	reg, _ := newReg(t)
+	exec(t, reg, "SET", "k1", "v1")
+	exec(t, reg, "SET", "k2", "v2")
+	if got := exec(t, reg, "MGET", "k1", "k2", "missing"); got != "*3\r\n$2\r\nv1\r\n$2\r\nv2\r\n$-1\r\n" {
+		t.Fatalf("got %q", got)
+	}
+	// Empty MGET is rejected by arity (min 1).
+	if got := exec(t, reg, "MGET"); !strings.HasPrefix(got, "-ERR wrong number of arguments") {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestMSet(t *testing.T) {
+	reg, _ := newReg(t)
+	if got := exec(t, reg, "MSET", "a", "1", "b", "2"); got != "+OK\r\n" {
+		t.Fatalf("got %q", got)
+	}
+	if got := exec(t, reg, "GET", "a"); got != "$1\r\n1\r\n" {
+		t.Fatalf("got %q", got)
+	}
+	if got := exec(t, reg, "GET", "b"); got != "$1\r\n2\r\n" {
+		t.Fatalf("got %q", got)
+	}
+	// Odd argument count → error.
+	if got := exec(t, reg, "MSET", "a", "1", "b"); !strings.HasPrefix(got, "-ERR wrong number of arguments") {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestMSetNX(t *testing.T) {
+	reg, _ := newReg(t)
+	if got := exec(t, reg, "MSETNX", "a", "1", "b", "2"); got != ":1\r\n" {
+		t.Fatalf("got %q", got)
+	}
+	if got := exec(t, reg, "MGET", "a", "b"); got != "*2\r\n$1\r\n1\r\n$1\r\n2\r\n" {
+		t.Fatalf("got %q", got)
+	}
+	// a already exists → whole batch aborts.
+	if got := exec(t, reg, "MSETNX", "c", "3", "a", "99"); got != ":0\r\n" {
+		t.Fatalf("got %q", got)
+	}
+	if got := exec(t, reg, "EXISTS", "c"); got != ":0\r\n" {
+		t.Fatalf("got %q (c must not exist after failed MSETNX)", got)
+	}
+	if got := exec(t, reg, "GET", "a"); got != "$1\r\n1\r\n" {
+		t.Fatalf("got %q (a must be untouched)", got)
+	}
+	// Odd argument count → error.
+	if got := exec(t, reg, "MSETNX", "x"); !strings.HasPrefix(got, "-ERR wrong number of arguments") {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestGetSet(t *testing.T) {
+	reg, _ := newReg(t)
+	if got := exec(t, reg, "GETSET", "k", "v1"); got != "$-1\r\n" {
+		t.Fatalf("missing key GETSET = %q, want null", got)
+	}
+	if got := exec(t, reg, "GETSET", "k", "v2"); got != "$2\r\nv1\r\n" {
+		t.Fatalf("got %q, want old value v1", got)
+	}
+	if got := exec(t, reg, "GET", "k"); got != "$2\r\nv2\r\n" {
+		t.Fatalf("got %q, want v2", got)
+	}
+}
+
+func TestSetNXCommand(t *testing.T) {
+	reg, _ := newReg(t)
+	if got := exec(t, reg, "SETNX", "k", "v"); got != ":1\r\n" {
+		t.Fatalf("got %q", got)
+	}
+	if got := exec(t, reg, "SETNX", "k", "other"); got != ":0\r\n" {
+		t.Fatalf("got %q", got)
+	}
+	if got := exec(t, reg, "GET", "k"); got != "$1\r\nv\r\n" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestStrLen(t *testing.T) {
+	reg, _ := newReg(t)
+	if got := exec(t, reg, "STRLEN", "missing"); got != ":0\r\n" {
+		t.Fatalf("got %q", got)
+	}
+	exec(t, reg, "SET", "k", "hello")
+	if got := exec(t, reg, "STRLEN", "k"); got != ":5\r\n" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestIncrByDecrBy(t *testing.T) {
+	reg, _ := newReg(t)
+	if got := exec(t, reg, "INCRBY", "n", "5"); got != ":5\r\n" {
+		t.Fatalf("got %q", got)
+	}
+	if got := exec(t, reg, "INCRBY", "n", "-2"); got != ":3\r\n" {
+		t.Fatalf("got %q", got)
+	}
+	if got := exec(t, reg, "DECRBY", "n", "3"); got != ":0\r\n" {
+		t.Fatalf("got %q", got)
+	}
+	exec(t, reg, "SET", "s", "abc")
+	if got := exec(t, reg, "INCRBY", "s", "1"); !strings.HasPrefix(got, "-ERR") {
+		t.Fatalf("got %q", got)
+	}
+	if got := exec(t, reg, "INCRBY", "n", "notanumber"); !strings.HasPrefix(got, "-ERR value is not an integer") {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestExpireAt(t *testing.T) {
+	reg, _ := newReg(t)
+	exec(t, reg, "SET", "k", "v")
+	// A timestamp in the past deletes the key immediately (Redis semantics).
+	if got := exec(t, reg, "EXPIREAT", "k", "1"); got != ":1\r\n" {
+		t.Fatalf("got %q", got)
+	}
+	if got := exec(t, reg, "EXISTS", "k"); got != ":0\r\n" {
+		t.Fatalf("got %q", got)
+	}
+	if got := exec(t, reg, "EXPIREAT", "missing", "99999999999"); got != ":0\r\n" {
+		t.Fatalf("got %q", got)
+	}
+	if got := exec(t, reg, "EXPIREAT", "k", "notanumber"); !strings.HasPrefix(got, "-ERR value is not an integer") {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestPExpirePersist(t *testing.T) {
+	reg, _ := newReg(t)
+	if got := exec(t, reg, "PEXPIRE", "missing", "100"); got != ":0\r\n" {
+		t.Fatalf("got %q", got)
+	}
+	exec(t, reg, "SET", "k", "v")
+	if got := exec(t, reg, "PEXPIRE", "k", "500"); got != ":1\r\n" {
+		t.Fatalf("got %q", got)
+	}
+	if got := exec(t, reg, "TTL", "k"); got != ":1\r\n" { // ceil(500ms/1s) = 1
+		t.Fatalf("got %q", got)
+	}
+	if got := exec(t, reg, "PERSIST", "k"); got != ":1\r\n" {
+		t.Fatalf("got %q", got)
+	}
+	if got := exec(t, reg, "TTL", "k"); got != ":-1\r\n" {
+		t.Fatalf("got %q, want no-TTL marker", got)
+	}
+	if got := exec(t, reg, "PERSIST", "k"); got != ":0\r\n" {
+		t.Fatalf("got %q, want 0 for key without TTL", got)
+	}
+	if got := exec(t, reg, "PERSIST", "missing"); got != ":0\r\n" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestKeys(t *testing.T) {
+	reg, _ := newReg(t)
+	exec(t, reg, "MSET", "user:1", "a", "user:2", "b", "admin", "c")
+	got := map[string]bool{}
+	r := decodeReply(t, exec(t, reg, "KEYS", "user:*"))
+	if r.Kind != resp.RArray || len(r.Array) != 2 {
+		t.Fatalf("KEYS user:* = %v, want 2 keys", r)
+	}
+	for _, k := range r.Array {
+		got[string(k.Str)] = true
+	}
+	if !got["user:1"] || !got["user:2"] || got["admin"] {
+		t.Fatalf("KEYS user:* = %v, want exactly user:1 and user:2", got)
+	}
+	got = map[string]bool{}
+	r = decodeReply(t, exec(t, reg, "KEYS", "*"))
+	if r.Kind != resp.RArray || len(r.Array) != 3 {
+		t.Fatalf("KEYS * = %v, want 3 keys", r)
+	}
+	for _, k := range r.Array {
+		got[string(k.Str)] = true
+	}
+	for _, want := range []string{"user:1", "user:2", "admin"} {
+		if !got[want] {
+			t.Fatalf("KEYS * missing %q (got %v)", want, got)
+		}
+	}
+	r = decodeReply(t, exec(t, reg, "KEYS", "nomatch*"))
+	if r.Kind != resp.RArray || len(r.Array) != 0 {
+		t.Fatalf("KEYS nomatch* = %v, want empty", r)
+	}
+}
+
+func TestScan(t *testing.T) {
+	reg, _ := newReg(t)
+	exec(t, reg, "MSET", "k1", "1", "k2", "2", "k3", "3")
+	// Full iteration must collect all three keys.
+	seen := map[string]bool{}
+	cursor := "0"
+	guards := 0
+	for {
+		wire := exec(t, reg, "SCAN", cursor, "MATCH", "k*")
+		r := decodeReply(t, wire)
+		if r.Kind != resp.RArray || len(r.Array) != 2 {
+			t.Fatalf("SCAN reply = %v, want [cursor keys]", r)
+		}
+		cursor = string(r.Array[0].Str)
+		if r.Array[1].Kind != resp.RArray {
+			t.Fatalf("SCAN keys element = %v, want array", r.Array[1])
+		}
+		for _, k := range r.Array[1].Array {
+			seen[string(k.Str)] = true
+		}
+		if cursor == "0" {
+			break
+		}
+		guards++
+		if guards > 10 {
+			t.Fatal("scan did not terminate")
+		}
+	}
+	if len(seen) != 3 {
+		t.Fatalf("scan collected %d keys, want 3", len(seen))
+	}
+}
+
+// decodeReply runs a raw wire reply through resp.ReadReply.
+func decodeReply(t *testing.T, wire string) resp.Reply {
+	t.Helper()
+	r, err := resp.ReadReply(bufio.NewReader(bytes.NewBufferString(wire)), resp.DefaultLimits())
+	if err != nil {
+		t.Fatalf("ReadReply(%q): %v", wire, err)
+	}
+	return r
+}
+
+func TestScanSyntax(t *testing.T) {
+	reg, _ := newReg(t)
+	for _, args := range [][]string{
+		{"SCAN", "abc"},
+		{"SCAN", "-1"},
+		{"SCAN", "0", "MATCH"},
+		{"SCAN", "0", "COUNT", "abc"},
+		{"SCAN", "0", "BOGUS"},
+	} {
+		if got := exec(t, reg, args...); !strings.HasPrefix(got, "-ERR") {
+			t.Fatalf("exec(%v) = %q, want error", args, got)
+		}
 	}
 }

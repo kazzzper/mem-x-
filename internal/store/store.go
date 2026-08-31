@@ -13,6 +13,7 @@ import (
 	"errors"
 	"hash/maphash"
 	"runtime"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -141,6 +142,11 @@ func (s *Store) ShardCount() int { return len(s.shards) }
 // (faster than string conversion + maphash.String).
 func (s *Store) shardForBytes(key []byte) *shard {
 	return s.shards[maphash.Bytes(s.seed, key)&uint64(len(s.shards)-1)]
+}
+
+// shardIndex returns the index of the shard owning a []byte key.
+func (s *Store) shardIndex(key []byte) int {
+	return int(maphash.Bytes(s.seed, key) & uint64(len(s.shards)-1))
 }
 
 // shardForString returns the shard owning a string key (used by the expiry
@@ -440,4 +446,177 @@ func (s *Store) sweep() {
 		}
 		sh.mu.Unlock()
 	}
+}
+
+// Keys returns every live key whose name matches the glob pattern. It scans
+// all shards; O(N) over the dataset, matching Redis KEYS. Pattern semantics
+// are those of GlobMatch (Redis glob).
+func (s *Store) Keys(pattern string) []string {
+	var keys []string
+	for _, sh := range s.shards {
+		sh.mu.RLock()
+		for k, e := range sh.m {
+			if s.expired(&e) {
+				continue
+			}
+			if pattern == "" || GlobMatch(pattern, k) {
+				keys = append(keys, k)
+			}
+		}
+		sh.mu.RUnlock()
+	}
+	return keys
+}
+
+// Scan implements cursor-based key iteration (Redis SCAN). The cursor is
+// opaque to callers: 0 starts a scan and is also returned when iteration is
+// complete. count is an advisory hint (the returned batch may exceed it);
+// pattern filters keys (empty matches all). Each call fully scans one shard
+// so no live key is skipped; cursors advance one shard per call.
+//
+// Semantics match Redis: a key present for the whole scan is returned at
+// least once; a key modified during the scan may be returned more than once.
+func (s *Store) Scan(cursor, count int, pattern string) (int, []string) {
+	if count <= 0 {
+		count = 10
+	}
+	// cursor is a 1-based shard index; 0 means start (or done).
+	start := cursor
+	if start <= 0 || start > len(s.shards) {
+		start = 1
+	}
+	idx := start - 1
+	sh := s.shards[idx]
+	var keys []string
+	sh.mu.RLock()
+	for k, e := range sh.m {
+		if s.expired(&e) {
+			continue
+		}
+		if pattern == "" || GlobMatch(pattern, k) {
+			keys = append(keys, k)
+		}
+	}
+	sh.mu.RUnlock()
+	if idx+1 >= len(s.shards) {
+		return 0, keys // all shards consumed → done
+	}
+	return idx + 2, keys // next shard (1-based)
+}
+
+// GetSet atomically stores val under key and returns the previous value and
+// whether the key existed. Following Redis GETSET, any existing TTL is
+// cleared by the write.
+func (s *Store) GetSet(key, val []byte) ([]byte, bool) {
+	sh := s.shardForBytes(key)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+
+	e, ok := sh.m[string(key)]
+	if !ok || s.expired(&e) {
+		if ok {
+			s.purge(sh, string(key))
+		}
+		sh.m[string(key)] = entry{val: val}
+		s.count.Add(1)
+		return nil, false
+	}
+	old := e.val
+	sh.m[string(key)] = entry{val: val}
+	return old, true
+}
+
+// SetNXMulti atomically stores all pairs (key,value) only if none of the keys
+// already exist, mirroring Redis MSETNX: no write happens at all when any key
+// exists. It locks every involved shard in ascending order, so it cannot
+// deadlock with single-shard writers or with Flush (which also locks
+// ascending).
+func (s *Store) SetNXMulti(pairs [][2][]byte) bool {
+	if len(pairs) == 0 {
+		return true
+	}
+	// Involved shards, unique, ascending (consistent lock order).
+	seen := make(map[int]struct{}, len(pairs))
+	var idxs []int
+	for _, p := range pairs {
+		id := s.shardIndex(p[0])
+		if _, ok := seen[id]; !ok {
+			seen[id] = struct{}{}
+			idxs = append(idxs, id)
+		}
+	}
+	sort.Ints(idxs)
+	for _, id := range idxs {
+		s.shards[id].mu.Lock()
+	}
+	defer func() {
+		for i := len(idxs) - 1; i >= 0; i-- {
+			s.shards[idxs[i]].mu.Unlock()
+		}
+	}()
+
+	// Any existing key (including one already expired → purged) aborts all.
+	for _, p := range pairs {
+		sh := s.shards[s.shardIndex(p[0])]
+		if e, ok := sh.m[string(p[0])]; ok {
+			if s.expired(&e) {
+				s.purge(sh, string(p[0]))
+				continue
+			}
+			return false
+		}
+	}
+	for _, p := range pairs {
+		sh := s.shards[s.shardIndex(p[0])]
+		sh.m[string(p[0])] = entry{val: p[1]}
+		s.count.Add(1)
+	}
+	return true
+}
+
+// ExpireAt sets an absolute expiry deadline (Unix seconds), mirroring Redis
+// EXPIREAT. A deadline in the past deletes the key immediately (returning
+// true if it existed). Returns whether the key existed.
+func (s *Store) ExpireAt(key []byte, unixSeconds int64) bool {
+	sh := s.shardForBytes(key)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+
+	e, ok := sh.m[string(key)]
+	if !ok || s.expired(&e) {
+		if ok {
+			s.purge(sh, string(key))
+		}
+		return false
+	}
+	dl := unixSeconds * int64(time.Second)
+	if dl <= s.now().UnixNano() {
+		// Past deadline: Redis deletes the key right away.
+		s.purge(sh, string(key))
+		return true
+	}
+	sh.m[string(key)] = entry{val: e.val, expireAt: dl}
+	s.pushExpiry(string(key), dl)
+	return true
+}
+
+// Persist removes any TTL from key, mirroring Redis PERSIST. Returns whether
+// a timeout was removed (false for a missing key or one with no TTL).
+func (s *Store) Persist(key []byte) bool {
+	sh := s.shardForBytes(key)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+
+	e, ok := sh.m[string(key)]
+	if !ok || s.expired(&e) {
+		if ok {
+			s.purge(sh, string(key))
+		}
+		return false
+	}
+	if e.expireAt == 0 {
+		return false // no timeout to remove
+	}
+	sh.m[string(key)] = entry{val: e.val}
+	return true
 }
