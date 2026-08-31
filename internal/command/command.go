@@ -127,7 +127,7 @@ func (r *Registry) hEcho(ctx context.Context, args [][]byte) (resp.Reply, error)
 }
 
 func (r *Registry) hSet(ctx context.Context, args [][]byte) (resp.Reply, error) {
-	key := string(args[0])
+	key := args[0]
 	val := args[1]
 	var (
 		ttl    time.Duration
@@ -177,7 +177,7 @@ func (r *Registry) hSet(ctx context.Context, args [][]byte) (resp.Reply, error) 
 }
 
 func (r *Registry) hGet(ctx context.Context, args [][]byte) (resp.Reply, error) {
-	v, ok := r.store.Get(string(args[0]))
+	v, ok := r.store.Get(args[0])
 	if !ok {
 		return resp.NullReply(), nil
 	}
@@ -185,23 +185,15 @@ func (r *Registry) hGet(ctx context.Context, args [][]byte) (resp.Reply, error) 
 }
 
 func (r *Registry) hDel(ctx context.Context, args [][]byte) (resp.Reply, error) {
-	keys := make([]string, len(args))
-	for i, a := range args {
-		keys[i] = string(a)
-	}
-	return resp.IntegerReply(int64(r.store.Del(keys...))), nil
+	return resp.IntegerReply(int64(r.store.Del(args...))), nil
 }
 
 func (r *Registry) hExists(ctx context.Context, args [][]byte) (resp.Reply, error) {
-	keys := make([]string, len(args))
-	for i, a := range args {
-		keys[i] = string(a)
-	}
-	return resp.IntegerReply(int64(r.store.Exists(keys...))), nil
+	return resp.IntegerReply(int64(r.store.Exists(args...))), nil
 }
 
 func (r *Registry) hIncr(ctx context.Context, args [][]byte) (resp.Reply, error) {
-	n, err := r.store.IncrBy(string(args[0]), 1)
+	n, err := r.store.IncrBy(args[0], 1)
 	if err != nil {
 		return resp.Reply{}, err
 	}
@@ -209,7 +201,7 @@ func (r *Registry) hIncr(ctx context.Context, args [][]byte) (resp.Reply, error)
 }
 
 func (r *Registry) hDecr(ctx context.Context, args [][]byte) (resp.Reply, error) {
-	n, err := r.store.IncrBy(string(args[0]), -1)
+	n, err := r.store.IncrBy(args[0], -1)
 	if err != nil {
 		return resp.Reply{}, err
 	}
@@ -217,7 +209,7 @@ func (r *Registry) hDecr(ctx context.Context, args [][]byte) (resp.Reply, error)
 }
 
 func (r *Registry) hAppend(ctx context.Context, args [][]byte) (resp.Reply, error) {
-	n, err := r.store.Append(string(args[0]), args[1])
+	n, err := r.store.Append(args[0], args[1])
 	if err != nil {
 		return resp.Reply{}, err
 	}
@@ -225,7 +217,7 @@ func (r *Registry) hAppend(ctx context.Context, args [][]byte) (resp.Reply, erro
 }
 
 func (r *Registry) hType(ctx context.Context, args [][]byte) (resp.Reply, error) {
-	return resp.SimpleReply(r.store.Type(string(args[0]))), nil
+	return resp.SimpleReply(r.store.Type(args[0])), nil
 }
 
 func (r *Registry) hExpire(ctx context.Context, args [][]byte) (resp.Reply, error) {
@@ -233,19 +225,18 @@ func (r *Registry) hExpire(ctx context.Context, args [][]byte) (resp.Reply, erro
 	if err != nil {
 		return resp.Reply{}, errors.New("value is not an integer or out of range")
 	}
-	key := string(args[0])
 	if secs <= 0 {
 		// Redis: a non-positive TTL deletes the key immediately.
-		return resp.IntegerReply(int64(r.store.Del(key))), nil
+		return resp.IntegerReply(int64(r.store.Del(args[0]))), nil
 	}
-	if r.store.Expire(key, time.Duration(secs)*time.Second) {
+	if r.store.Expire(args[0], time.Duration(secs)*time.Second) {
 		return resp.IntegerReply(1), nil
 	}
 	return resp.IntegerReply(0), nil
 }
 
 func (r *Registry) hTTL(ctx context.Context, args [][]byte) (resp.Reply, error) {
-	rem, exists := r.store.TTL(string(args[0]))
+	rem, exists := r.store.TTL(args[0])
 	if !exists {
 		return resp.IntegerReply(-2), nil
 	}

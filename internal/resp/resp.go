@@ -155,11 +155,11 @@ func NewWriter(w io.Writer) *Writer { return &Writer{bw: bufio.NewWriter(w)} }
 // Flush writes any buffered bytes to the underlying writer.
 func (w *Writer) Flush() error { return w.bw.Flush() }
 
-// SimpleString writes +s\r\n.
-func (w *Writer) SimpleString(s string) error { return w.writeLine('+', []byte(s)) }
+// SimpleString writes +s\r\n. Zero-alloc (no []byte conversion).
+func (w *Writer) SimpleString(s string) error { return w.writeStringLine('+', s) }
 
-// Error writes -s\r\n.
-func (w *Writer) Error(s string) error { return w.writeLine('-', []byte(s)) }
+// Error writes -s\r\n. Zero-alloc (no []byte conversion).
+func (w *Writer) Error(s string) error { return w.writeStringLine('-', s) }
 
 // Integer writes :n\r\n.
 func (w *Writer) Integer(n int64) error {
@@ -214,6 +214,19 @@ func (w *Writer) writeLine(prefix byte, payload []byte) error {
 		return err
 	}
 	if _, err := w.bw.Write(payload); err != nil {
+		return err
+	}
+	_, err := w.bw.WriteString("\r\n")
+	return err
+}
+
+// writeStringLine writes prefix + s + CRLF without converting s to []byte
+// (avoids an allocation on the simple-string / error hot path).
+func (w *Writer) writeStringLine(prefix byte, s string) error {
+	if err := w.bw.WriteByte(prefix); err != nil {
+		return err
+	}
+	if _, err := w.bw.WriteString(s); err != nil {
 		return err
 	}
 	_, err := w.bw.WriteString("\r\n")

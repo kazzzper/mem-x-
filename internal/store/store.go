@@ -1,13 +1,10 @@
-// Package store implements the in-memory key/value engine behind mem-x.
+// Package store implements a sharded, in-memory key/value store with TTL
+// expiry. The store is safe for concurrent use.
 //
-// Design (see PLAN.md §3): a fixed set of shards each guarding a slice of the
-// key space with an RWMutex, so concurrent access to different keys does not
-// contend on one lock. Expiration uses a min-heap of deadlines with lazy
-// checks on access plus an active sweeper.
-//
-// Correctness first: every per-key mutation happens under that key's shard
-// lock, and no lock is held across I/O. Stored values are immutable once
-// written — callers must not mutate the byte slices returned by Get.
+// Keys are []byte (the wire format), hashed with maphash.Bytes. The map
+// lookup uses inline string(key) conversion for the compiler's zero-alloc
+// elision (m[string(b)] does not allocate). The expiry heap stores string
+// keys; conversions on that path are rare (TTL writes only).
 package store
 
 import (
@@ -30,24 +27,14 @@ var ErrNotInteger = errors.New("value is not an integer or out of range")
 // value size. This bounds the unbounded APPEND growth path (AGENTS.md §2.6).
 var ErrValueTooLarge = errors.New("string exceeds maximum allowed size")
 
-// entry is one stored value plus its optional absolute expiration deadline.
-type entry struct {
-	val      []byte
-	expireAt int64 // UnixNano deadline; 0 means no expiry
-}
-
-// shard guards a slice of the key space.
-type shard struct {
-	mu sync.RWMutex
-	m  map[string]entry
-}
-
-// Option configures a Store.
+// Option is a functional option for Store.
 type Option func(*Store)
 
-// WithClock overrides the Store's time source (for deterministic tests).
+// WithClock overrides the time source (for testing).
 func WithClock(now func() time.Time) Option {
-	return func(s *Store) { s.now = now }
+	return func(s *Store) {
+		s.now = now
+	}
 }
 
 // WithShards sets the number of shards (rounded up to a power of two).
@@ -105,6 +92,30 @@ func New(opts ...Option) *Store {
 	return s
 }
 
+type shard struct {
+	mu sync.RWMutex
+	m  map[string]entry
+}
+
+type entry struct {
+	val      []byte
+	expireAt int64 // 0 = no expiry
+}
+
+// expEntry is one element in the min-heap used for active TTL expiry.
+type expEntry struct {
+	deadline int64
+	key      string
+}
+
+type expHeap []expEntry
+
+func (h expHeap) Len() int           { return len(h) }
+func (h expHeap) Less(i, j int) bool { return h[i].deadline < h[j].deadline }
+func (h expHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *expHeap) Push(x any)        { *h = append(*h, x.(expEntry)) }
+func (h *expHeap) Pop() any          { old := *h; n := len(old); x := old[n-1]; *h = old[:n-1]; return x }
+
 func nextPow2(n int) int {
 	p := 1
 	for p < n {
@@ -126,12 +137,16 @@ func clamp(n, lo, hi int) int {
 // ShardCount reports the number of shards (for diagnostics/info).
 func (s *Store) ShardCount() int { return len(s.shards) }
 
-// shardFor returns the shard owning key. Shards are always a power of two, so
-// masking is safe. maphash (seeded per Store) spreads keys and thwarts
-// hash-flooding adversaries at the shard level.
-func (s *Store) shardFor(key string) *shard {
-	h := maphash.String(s.seed, key)
-	return s.shards[h&uint64(len(s.shards)-1)]
+// shardForBytes returns the shard owning a []byte key using maphash.Bytes
+// (faster than string conversion + maphash.String).
+func (s *Store) shardForBytes(key []byte) *shard {
+	return s.shards[maphash.Bytes(s.seed, key)&uint64(len(s.shards)-1)]
+}
+
+// shardForString returns the shard owning a string key (used by the expiry
+// sweeper which iterates heap entries that are already strings).
+func (s *Store) shardForString(key string) *shard {
+	return s.shards[maphash.String(s.seed, key)&uint64(len(s.shards)-1)]
 }
 
 // expired reports whether e has passed its deadline. Callers must hold the
@@ -149,16 +164,17 @@ func (s *Store) purge(sh *shard, key string) {
 
 // Get returns the value for key and whether it exists. Expired entries are
 // treated as absent and purged. The returned slice is immutable.
-func (s *Store) Get(key string) ([]byte, bool) {
-	sh := s.shardFor(key)
+func (s *Store) Get(key []byte) ([]byte, bool) {
+	sh := s.shardForBytes(key)
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
-	e, ok := sh.m[key]
+
+	e, ok := sh.m[string(key)] // compiler elides the string allocation
 	if !ok {
 		return nil, false
 	}
 	if s.expired(&e) {
-		s.purge(sh, key)
+		s.purge(sh, string(key))
 		return nil, false
 	}
 	return e.val, true
@@ -175,14 +191,14 @@ const (
 
 // Set stores val under key with an optional ttl (<= 0 disables expiry) and
 // reports whether the write happened (false when an NX/XX condition fails).
-func (s *Store) Set(key string, val []byte, ttl time.Duration, mode SetMode) bool {
-	sh := s.shardFor(key)
+func (s *Store) Set(key []byte, val []byte, ttl time.Duration, mode SetMode) bool {
+	sh := s.shardForBytes(key)
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 
-	e, exists := sh.m[key]
+	e, exists := sh.m[string(key)]
 	if exists && s.expired(&e) {
-		s.purge(sh, key)
+		s.purge(sh, string(key))
 		exists = false
 	}
 	switch mode {
@@ -199,29 +215,30 @@ func (s *Store) Set(key string, val []byte, ttl time.Duration, mode SetMode) boo
 	if ttl > 0 {
 		dl = s.now().Add(ttl).UnixNano()
 	}
-	sh.m[key] = entry{val: val, expireAt: dl}
+	sh.m[string(key)] = entry{val: val, expireAt: dl}
 	if !exists {
 		s.count.Add(1)
 	}
 	if dl != 0 {
-		s.pushExpiry(key, dl)
+		// pushExpiry takes string; this conversion is rare (only TTL writes).
+		s.pushExpiry(string(key), dl)
 	}
 	return true
 }
 
 // Del removes keys and reports how many existed (and were not already
 // expired).
-func (s *Store) Del(keys ...string) int {
+func (s *Store) Del(keys ...[]byte) int {
 	n := 0
 	for _, k := range keys {
-		sh := s.shardFor(k)
+		sh := s.shardForBytes(k)
 		sh.mu.Lock()
-		e, ok := sh.m[k]
+		e, ok := sh.m[string(k)]
 		if ok {
 			if !s.expired(&e) {
 				n++
 			}
-			s.purge(sh, k)
+			s.purge(sh, string(k))
 		}
 		sh.mu.Unlock()
 	}
@@ -229,12 +246,12 @@ func (s *Store) Del(keys ...string) int {
 }
 
 // Exists reports how many of the keys exist and are not expired.
-func (s *Store) Exists(keys ...string) int {
+func (s *Store) Exists(keys ...[]byte) int {
 	n := 0
 	for _, k := range keys {
-		sh := s.shardFor(k)
+		sh := s.shardForBytes(k)
 		sh.mu.RLock()
-		e, ok := sh.m[k]
+		e, ok := sh.m[string(k)]
 		if ok && !s.expired(&e) {
 			n++
 		}
@@ -245,14 +262,14 @@ func (s *Store) Exists(keys ...string) int {
 
 // IncrBy atomically adds delta to the integer stored at key (0 if missing)
 // and returns the new value.
-func (s *Store) IncrBy(key string, delta int64) (int64, error) {
-	sh := s.shardFor(key)
+func (s *Store) IncrBy(key []byte, delta int64) (int64, error) {
+	sh := s.shardForBytes(key)
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 
-	e, ok := sh.m[key]
+	e, ok := sh.m[string(key)]
 	if ok && s.expired(&e) {
-		s.purge(sh, key)
+		s.purge(sh, string(key))
 		ok = false
 	}
 	var cur int64
@@ -264,81 +281,80 @@ func (s *Store) IncrBy(key string, delta int64) (int64, error) {
 		cur = n
 	}
 	cur += delta
-	sh.m[key] = entry{val: strconv.AppendInt(nil, cur, 10)}
+	sh.m[string(key)] = entry{val: strconv.AppendInt(nil, cur, 10)}
 	if !ok {
 		s.count.Add(1)
 	}
 	return cur, nil
 }
 
-// Append appends suffix to the value at key (treating a missing key as an
-// empty string) and returns the new length.
-func (s *Store) Append(key string, suffix []byte) (int, error) {
-	sh := s.shardFor(key)
+// Append appends suffix to the value at key (creating it if missing) and
+// returns the new length.
+func (s *Store) Append(key, suffix []byte) (int, error) {
+	sh := s.shardForBytes(key)
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 
-	e, ok := sh.m[key]
+	e, ok := sh.m[string(key)]
 	if ok && s.expired(&e) {
-		s.purge(sh, key)
+		s.purge(sh, string(key))
 		ok = false
 	}
 	if !ok {
 		if int64(len(suffix)) > s.maxValLen {
 			return 0, ErrValueTooLarge
 		}
-		sh.m[key] = entry{val: append([]byte(nil), suffix...)}
+		sh.m[string(key)] = entry{val: append([]byte(nil), suffix...)}
 		s.count.Add(1)
 		return len(suffix), nil
 	}
 	if int64(len(e.val))+int64(len(suffix)) > s.maxValLen {
 		return 0, ErrValueTooLarge
 	}
-	// Build a fresh slice: stored values are immutable, so never mutate e.val.
 	nv := make([]byte, 0, len(e.val)+len(suffix))
 	nv = append(nv, e.val...)
 	nv = append(nv, suffix...)
-	sh.m[key] = entry{val: nv, expireAt: e.expireAt}
+	sh.m[string(key)] = entry{val: nv, expireAt: e.expireAt}
 	return len(nv), nil
 }
 
-// Expire sets a ttl on key and reports whether the key existed (and was not
-// already expired).
-func (s *Store) Expire(key string, ttl time.Duration) bool {
-	if ttl <= 0 {
-		return false
-	}
-	sh := s.shardFor(key)
+// Expire sets a TTL on key. A non-positive ttl deletes the key. Returns true
+// if the key existed.
+func (s *Store) Expire(key []byte, ttl time.Duration) bool {
+	sh := s.shardForBytes(key)
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 
-	e, ok := sh.m[key]
-	if !ok {
+	e, ok := sh.m[string(key)]
+	if !ok || s.expired(&e) {
+		if ok {
+			s.purge(sh, string(key))
+		}
 		return false
 	}
-	if s.expired(&e) {
-		s.purge(sh, key)
-		return false
+	if ttl <= 0 {
+		s.purge(sh, string(key))
+		return true
 	}
-	e.expireAt = s.now().Add(ttl).UnixNano()
-	sh.m[key] = e
-	s.pushExpiry(key, e.expireAt)
+	dl := s.now().Add(ttl).UnixNano()
+	sh.m[string(key)] = entry{val: e.val, expireAt: dl}
+	s.pushExpiry(string(key), dl)
 	return true
 }
 
-// TTL reports the remaining lifetime for key. It returns (0, false) when the
-// key is missing and a negative duration when present without a TTL.
-func (s *Store) TTL(key string) (time.Duration, bool) {
-	sh := s.shardFor(key)
+// TTL returns the remaining time to live. The bool is false when the key is
+// missing and a negative duration when present without a TTL.
+func (s *Store) TTL(key []byte) (time.Duration, bool) {
+	sh := s.shardForBytes(key)
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
 
-	e, ok := sh.m[key]
+	e, ok := sh.m[string(key)]
 	if !ok {
 		return 0, false
 	}
 	if s.expired(&e) {
-		s.purge(sh, key)
+		s.purge(sh, string(key))
 		return 0, false
 	}
 	if e.expireAt == 0 {
@@ -349,7 +365,7 @@ func (s *Store) TTL(key string) (time.Duration, bool) {
 
 // Type reports the value type at key: "string" when present, "none" when
 // missing.
-func (s *Store) Type(key string) string {
+func (s *Store) Type(key []byte) string {
 	if _, ok := s.Get(key); ok {
 		return "string"
 	}
@@ -407,41 +423,21 @@ func (s *Store) pushExpiry(key string, deadline int64) {
 
 func (s *Store) sweep() {
 	now := s.now().UnixNano()
-
+	// PopN: collect all expired entries under the expiry lock, then purge
+	// each under its shard lock (never hold expMu across a shard lock).
 	s.expMu.Lock()
-	var keys []string
+	var expired []expEntry
 	for s.exp.Len() > 0 && s.exp[0].deadline <= now {
-		keys = append(keys, heap.Pop(&s.exp).(expEntry).key)
+		expired = append(expired, heap.Pop(&s.exp).(expEntry))
 	}
 	s.expMu.Unlock()
 
-	for _, k := range keys {
-		sh := s.shardFor(k)
+	for _, e := range expired {
+		sh := s.shardForString(e.key)
 		sh.mu.Lock()
-		if e, ok := sh.m[k]; ok && e.expireAt != 0 && e.expireAt <= now {
-			s.purge(sh, k)
+		if cur, ok := sh.m[e.key]; ok && cur.expireAt == e.deadline {
+			s.purge(sh, e.key)
 		}
 		sh.mu.Unlock()
 	}
-}
-
-// expEntry is one scheduled expiration.
-type expEntry struct {
-	deadline int64
-	key      string
-}
-
-// expHeap is a min-heap of expEntry ordered by deadline.
-type expHeap []expEntry
-
-func (h expHeap) Len() int           { return len(h) }
-func (h expHeap) Less(i, j int) bool { return h[i].deadline < h[j].deadline }
-func (h expHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *expHeap) Push(x any)        { *h = append(*h, x.(expEntry)) }
-func (h *expHeap) Pop() any {
-	old := *h
-	n := len(old)
-	e := old[n-1]
-	*h = old[:n-1]
-	return e
 }

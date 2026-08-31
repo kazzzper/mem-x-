@@ -20,12 +20,13 @@ type Command struct {
 var ErrEmptyCommand = errors.New("empty command")
 
 // Parse builds a Command from raw tokens (name first). It lowercases the name
-// so dispatch is case-insensitive, matching Redis.
+// so dispatch is case-insensitive, matching Redis. When the name is already
+// lowercase (the common case) it avoids the bytes.ToLower allocation.
 func Parse(tokens [][]byte) (Command, error) {
 	if len(tokens) == 0 {
 		return Command{}, ErrEmptyCommand
 	}
-	name := string(bytes.ToLower(tokens[0]))
+	name := lowerString(tokens[0])
 	if name == "" {
 		return Command{}, ErrEmptyCommand
 	}
@@ -34,4 +35,16 @@ func Parse(tokens [][]byte) (Command, error) {
 		cmd.Args = tokens[1:]
 	}
 	return cmd, nil
+}
+
+// lowerString returns b as a lowercased string, allocating only when an
+// uppercase byte is actually found (the ~99% common case where the command
+// is already lowercase saves one []byte → string allocation).
+func lowerString(b []byte) string {
+	for _, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			return string(bytes.ToLower(b))
+		}
+	}
+	return string(b)
 }
