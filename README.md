@@ -89,6 +89,19 @@ redis-cli-style (`(error) ERR ...`); connection problems go to stderr. Type
 `QUIT`/`EXIT` to leave, `HELP` for the brief usage. Quote arguments with
 double quotes and backslash-escape embedded quotes (`ECHO "say \"hi\""`).
 
+**Auto-spawn:** if no server is running and the address is local
+(`127.0.0.1`, `localhost`, `:6379`, …), the CLI boots an **in-process** mem-x
+server on that port, connects to it, and stops it when the CLI exits. The
+`note:` line on stderr tells you when this happened. Two caveats of the
+session-scoped design:
+
+- Each CLI invocation is an **isolated empty instance** — data written in one
+  invocation is gone by the next (the server dies with the CLI).
+- Within one interactive session the embedded server holds your data normally.
+
+For a persistent shared server (survives across sessions), start the
+standalone `./mem-x` yourself and point the CLI at it.
+
 ## Quality gate
 
 ```sh
