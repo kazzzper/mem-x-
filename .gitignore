@@ -16,3 +16,11 @@ coverage.*
 .idea/
 .vscode/
 .DS_Store
+.gocache/
+
+# go caches
+.gomodcache/
+.gopath/
+
+# fuzz corpus
+**/testdata/fuzz/

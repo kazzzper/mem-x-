@@ -16,9 +16,10 @@ before it lands.
 
 **mem-x** is a from-scratch, in-memory Redis-like key/value server written in
 Go. Core architecture: TCP listener → RESP codec → command parser → dispatcher →
-in-memory store. The core is **stdlib-only** (zero third-party runtime deps) so
-it cross-compiles to any platform with `CGO_ENABLED=0` (linux, darwin, windows,
-and beyond). It must be lightweight before it grows: every layer starts minimal,
+in-memory store. The **runtime core is stdlib-only** (zero third-party runtime
+deps), so it cross-compiles to any platform with `CGO_ENABLED=0` (linux,
+darwin, windows, and beyond); the **test harness may use vetted external
+repos** (§5). It must be lightweight before it grows: every layer starts minimal,
 correct, and tested; optimization is a separate, benchmark-driven phase. Agents
 apply systems-engineering fundamentals — DSA, memory discipline, concurrency
 hygiene — without gold-plating.
@@ -33,6 +34,7 @@ hygiene — without gold-plating.
 | `planner` | Architect | Decomposes work into plans before any code | L |
 | `classifier` | Task router | Grades complexity + task type → agent + model | S |
 | `engineer` | Senior systems engineer | Implements (Go), correctness-first | L |
+| `testwriter` | Test writer | Writes/extends the test suite to spec, race-clean | M |
 | `reviewer` | Code reviewer | Catches bugs, races, leaks, growing patterns | L |
 | `security` | Security engineer | Threat model, fuzzing, dep audit, hardening | L |
 | `research` | Pattern researcher | Finds cleverer DSA/patterns, with evidence | M |
@@ -156,6 +158,19 @@ Suggested future agents (spawn when the work shows up, not before): `fuzzer`
 - **Output contract:** Doc updates matching what actually shipped.
 - **Hard rules:** Docs never claim features that don't exist; examples must run.
 
+### 2.11 `testwriter` — test writer
+- **Mission:** Write and extend the test suite so every behavior is pinned by
+  tests before review. Unit, integration, concurrency (`-race`), and edge
+  cases (limits, malformed input, empty input).
+- **Spawn triggers:** Spawned by `engineer` when implementation is done, always
+  before the reviewer gate.
+- **Output contract:** Test files + a run log showing `go test -race ./...`
+  and `go vet ./...` green, with coverage noted.
+- **Hard rules:** Tests assert *behavior*, not implementation. Never weaken an
+  assertion to make it pass; never delete a failing test without a reason and
+  a replacement. Every public API surface has at least one test; error paths
+  and cap boundaries are always covered.
+
 ---
 
 ## 3. Classifier model tiers
@@ -200,14 +215,22 @@ Security and protocol tasks **never** route below tier 3.
 
 ## 5. Dependency policy (secure open-source Go deps)
 
-- **Default: stdlib only.** Adding a dependency requires a written case from
-  the engineer and a security verdict.
-- **If a dep is ever justified:** it must be (a) widely used and maintained,
-  (b) MIT/Apache-2.0/BSD licensed, (c) zero known CVEs (`govulncheck` clean),
-  (d) a shallow dependency tree, (e) vendored (`go mod vendor`) so builds are
-  hermetic, and (f) reviewed line-by-line at the version we pin.
+- **Runtime core: stdlib-only.** The server binary builds with
+  `CGO_ENABLED=0` and zero third-party runtime imports — this keeps the
+  cross-platform story trivial (PLAN.md §0).
+- **Test/tooling deps: allowed from the allowlist.** Test harnesses and
+  tooling use trusted, widely-adopted libraries instead of reinventing
+  wheels. Any new dep must be: (a) widely used and maintained, (b)
+  MIT/Apache-2.0/BSD licensed, (c) zero known CVEs (`govulncheck` clean),
+  (d) a shallow dependency tree, (e) vendored (`go mod vendor`) for hermetic
+  builds, and (f) reviewed line-by-line at the pinned version.
+- **Allowlist (current):**
+  - `github.com/redis/go-redis/v9` — official Redis client; the integration
+    harness uses it to verify RESP wire compatibility. MIT.
+  - `github.com/stretchr/testify` — Go test assertions. MIT.
 - **Review cadence:** `govulncheck ./...` runs in every security pass; pin
-  exact versions; renovate-style updates go through the same gate.
+  exact versions; updates go through the same gate. The maintainer retains
+  final veto over every dependency.
 
 ---
 
@@ -215,7 +238,7 @@ Security and protocol tasks **never** route below tier 3.
 
 ```
 task → orchestrator → classifier (tier+type) → planner (if design) 
-     → engineer (implement) → reviewer (gate 1) → security (gate 2)
+     → engineer (implement) → testwriter (tests) → reviewer (gate 1) → security (gate 2)
      → bench (gate 3, if perf-relevant) → portability (gate 4, at milestones)
      → orchestrator accepts → docs/changelog → commit
 ```
@@ -226,7 +249,42 @@ orchestrator with a reason.
 
 ---
 
-## 7. Machine-readable registry (for the orchestrator)
+## 7. Spawning between agents
+
+The **orchestrator is the only agent that actually spawns.** Every other agent
+**requests** a spawn through the orchestrator when its own mission needs a
+peer. Each agent knows whom it needs and when:
+
+| Requester | Requests | When |
+|-----------|----------|------|
+| orchestrator | classifier | start of every task |
+| classifier | planner | task type is design, or complexity ≥ L |
+| classifier | engineer | task type is code |
+| planner | research | design question needs evidence |
+| planner | engineer | plan is approved |
+| engineer | testwriter | implementation is done (before review) |
+| engineer | research | "is there a faster way" question mid-implementation |
+| testwriter | reviewer | test suite is complete |
+| reviewer | engineer | findings need fixing (gate failure) |
+| reviewer | security | review is clean |
+| security | engineer | hardening findings need fixing |
+| security | research | new attack surface needs evidence |
+| security | portability | milestone or net/os/signal change |
+| reviewer/bench | bench | optimization claim needs numbers |
+| bench | engineer | an optimization needs implementing or reverting |
+| reviewer | docs | behavior changed at acceptance |
+
+Rules:
+- No agent spawns itself. Requests go to the orchestrator with a reason; the
+  orchestrator may deny (e.g. "not now — lightweight-first").
+- Gates are the only *mandatory* spawn points (reviewer → security → bench →
+  portability); all other spawns are on-demand.
+- A spawned agent reports back to the requester through the orchestrator; the
+  requester does not own the spawned agent's lifecycle.
+
+---
+
+## 8. Machine-readable registry (for the orchestrator)
 
 ```yaml
 project: mem-x
@@ -238,7 +296,7 @@ agents:
   - id: orchestrator
     mission: route work, spawn agents, run gates
     model_tier: 4
-    spawns: [classifier, planner, engineer, reviewer, security, research, bench, portability, docs]
+    spawns: [classifier, planner, engineer, testwriter, reviewer, security, research, bench, portability, docs]
   - id: planner
     mission: plans before code
     model_tier: 3
@@ -251,6 +309,12 @@ agents:
     mission: implement Go, correctness-first
     model_tier: 3
     output: code + tests + note
+    requests: [testwriter, research]
+  - id: testwriter
+    mission: write/extend tests to spec, race-clean
+    model_tier: 2
+    output: tests + green run log
+    requests: [reviewer]
   - id: reviewer
     mission: catch bugs, leaks, races, growing patterns
     model_tier: 3
