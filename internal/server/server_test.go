@@ -494,3 +494,50 @@ func TestServerTLSPartialConfigFallsBackToPlaintext(t *testing.T) {
 		t.Fatalf("PING got %q", got)
 	}
 }
+
+func TestServerRequirePass(t *testing.T) {
+	cfg := config.Default()
+	cfg.Addr = "127.0.0.1:0"
+	cfg.RequirePass = "s3cret"
+	addr := startServer(t, cfg)
+
+	conn := dial(t, addr)
+	defer conn.Close()
+	r := bufio.NewReader(conn)
+
+	// Unauthenticated commands are rejected with NOAUTH.
+	send(t, conn, "*1\r\n$4\r\nPING\r\n")
+	if got := readLine(t, r); got != "-NOAUTH Authentication required." {
+		t.Fatalf("PING pre-auth got %q", got)
+	}
+
+	// Wrong password is rejected.
+	send(t, conn, "*2\r\n$4\r\nAUTH\r\n$9\r\nwrongpass\r\n")
+	if got := readLine(t, r); got != "-WRONGPASS invalid username-password pair or user is disabled." {
+		t.Fatalf("AUTH wrong got %q", got)
+	}
+	// Still not authenticated.
+	send(t, conn, "*1\r\n$4\r\nPING\r\n")
+	if got := readLine(t, r); got != "-NOAUTH Authentication required." {
+		t.Fatalf("PING after wrong AUTH got %q", got)
+	}
+
+	// Correct password unlocks the connection.
+	send(t, conn, "*2\r\n$4\r\nAUTH\r\n$6\r\ns3cret\r\n")
+	if got := readLine(t, r); got != "+OK" {
+		t.Fatalf("AUTH got %q", got)
+	}
+	send(t, conn, "*1\r\n$4\r\nPING\r\n")
+	if got := readLine(t, r); got != "+PONG" {
+		t.Fatalf("PING post-auth got %q", got)
+	}
+
+	// A second connection must authenticate independently.
+	conn2 := dial(t, addr)
+	defer conn2.Close()
+	r2 := bufio.NewReader(conn2)
+	send(t, conn2, "*2\r\n$3\r\nGET\r\n$1\r\nk\r\n")
+	if got := readLine(t, r2); got != "-NOAUTH Authentication required." {
+		t.Fatalf("second conn GET pre-auth got %q", got)
+	}
+}

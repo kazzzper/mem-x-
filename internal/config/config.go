@@ -29,6 +29,10 @@ type Config struct {
 	// Clients connect with memxs:// URLs.
 	TLSCertFile string
 	TLSKeyFile  string
+	// RequirePass, when non-empty, enables authentication: every connection
+	// must issue AUTH <password> before other commands are accepted. This is
+	// the password in a memx://user:pass@host connection URL.
+	RequirePass string
 }
 
 // Default returns the default configuration.

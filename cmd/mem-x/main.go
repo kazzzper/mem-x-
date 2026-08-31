@@ -38,6 +38,7 @@ func main() {
 	flag.StringVar(&cfg.AppendFsync, "appendfsync", cfg.AppendFsync, "AOF fsync policy: always|everysec|no")
 	flag.StringVar(&cfg.TLSCertFile, "tls-cert", cfg.TLSCertFile, "TLS certificate (PEM); enables TLS when set with -tls-key")
 	flag.StringVar(&cfg.TLSKeyFile, "tls-key", cfg.TLSKeyFile, "TLS private key (PEM)")
+	flag.StringVar(&cfg.RequirePass, "requirepass", cfg.RequirePass, "require AUTH <password> on every connection (empty = no auth)")
 	logLevel := flag.String("log-level", "info", "log level: debug|info|warn|error (suppress less-important logs)")
 	flag.Parse()
 

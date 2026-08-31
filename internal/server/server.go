@@ -7,11 +7,13 @@ package server
 import (
 	"bufio"
 	"context"
+	"crypto/subtle"
 	"crypto/tls"
 	"errors"
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -197,6 +199,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		MaxInlineLen: s.cfg.MaxInlineLen,
 		MaxHeaderLen: 64,
 	}
+	authed := s.cfg.RequirePass == "" // no password → pre-authed
 
 	for {
 		if ctx.Err() != nil {
@@ -211,6 +214,31 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		if err != nil {
 			s.handleReadError(conn, bw, err)
 			return
+		}
+		// Auth gate: when a password is required, only AUTH is accepted
+		// before the connection is authenticated (Redis-compatible NOAUTH
+		// semantics).
+		if !authed {
+			name := strings.ToLower(string(tokens[0]))
+			if name != "auth" {
+				_ = bw.Error("NOAUTH Authentication required.")
+				_ = bw.Flush()
+				continue
+			}
+			if len(tokens) != 2 {
+				_ = bw.Error("ERR wrong number of arguments for 'auth' command")
+				_ = bw.Flush()
+				continue
+			}
+			if subtle.ConstantTimeCompare(tokens[1], []byte(s.cfg.RequirePass)) == 1 {
+				authed = true
+				_ = bw.SimpleString("OK")
+				_ = bw.Flush()
+			} else {
+				_ = bw.Error("WRONGPASS invalid username-password pair or user is disabled.")
+				_ = bw.Flush()
+			}
+			continue
 		}
 		reply := s.reg.Execute(ctx, tokens)
 		if err := reply.WriteTo(bw); err != nil {
