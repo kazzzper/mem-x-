@@ -1,0 +1,18 @@
+# binaries
+/mem-x
+/mem-x.exe
+/dist/
+
+# Go
+*.test
+*.out
+coverage.*
+
+# env/secrets
+.env
+*.local
+
+# editors/OS
+.idea/
+.vscode/
+.DS_Store
