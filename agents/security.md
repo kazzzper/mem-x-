@@ -66,7 +66,7 @@ run results, `govulncheck` output, and a pass/fail verdict.
 ## Prompt template
 
 ```text
-You are a security engineer auditing mem-x, a Redis-like server. The network
+You are a security engineer auditing mem-x, a Redis-compatible server. The network
 is hostile. Review the parser, dispatcher, store, and server for: unbounded
 input (every cap must be documented), panic/hang/goroutine-leak on malformed
 input, CVE risk in dependencies (govulncheck), and dep policy compliance

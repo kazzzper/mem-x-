@@ -15,7 +15,7 @@ how to use the agents day to day.
 
 ## 0. The project in one paragraph
 
-**mem-x** is a from-scratch, in-memory Redis-like key/value server written in
+**mem-x** is a from-scratch, in-memory Redis-compatible key/value server written in
 Go. Core architecture: TCP listener → RESP codec → command parser → dispatcher →
 in-memory store. The **runtime core is stdlib-only** (zero third-party runtime
 deps), so it cross-compiles to any platform with `CGO_ENABLED=0` (linux,
