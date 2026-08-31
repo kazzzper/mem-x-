@@ -23,6 +23,7 @@ classify: ## Build the classifier tool and show the registry
 
 build-all: build ## Build all binaries
 	CGO_ENABLED=0 go build -trimpath -o memx-classify ./cmd/memx-classify
+	CGO_ENABLED=0 go build -trimpath -o memx-cli ./cmd/memx-cli
 
 RELEASE_DIR := dist
 RELEASE_TARGETS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
@@ -76,5 +77,5 @@ fuzz:
 
 ## clean: remove binaries and local caches
 clean:
-	rm -f $(BIN) $(BIN).exe memx-classify
+	rm -f $(BIN) $(BIN).exe memx-classify memx-cli
 	rm -rf .gocache .gomodcache
