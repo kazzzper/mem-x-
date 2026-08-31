@@ -13,9 +13,11 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"mem-x/internal/command"
 	"mem-x/internal/config"
+	"mem-x/internal/persist"
 	"mem-x/internal/server"
 	"mem-x/internal/store"
 	"mem-x/internal/version"
@@ -32,6 +34,8 @@ func main() {
 	flag.DurationVar(&cfg.IdleTimeout, "idle-timeout", cfg.IdleTimeout, "client idle timeout (0 = none)")
 	flag.DurationVar(&cfg.TTLTick, "ttl-tick", cfg.TTLTick, "expiry sweeper interval")
 	flag.IntVar(&cfg.Shards, "shards", cfg.Shards, "store shard count (0 = auto)")
+	flag.StringVar(&cfg.AOFPath, "aof", cfg.AOFPath, "append-only persistence file (empty = disabled)")
+	flag.StringVar(&cfg.AppendFsync, "appendfsync", cfg.AppendFsync, "AOF fsync policy: always|everysec|no")
 	logLevel := flag.String("log-level", "info", "log level: debug|info|warn|error (suppress less-important logs)")
 	flag.Parse()
 
@@ -51,6 +55,48 @@ func main() {
 	st := store.New(store.WithShards(cfg.Shards), store.WithMaxValueLen(cfg.MaxValueLen))
 	stats := command.NewStats()
 	reg := command.New(st, stats)
+
+	// AOF persistence: load the existing log (replay with propagator still
+	// nil so replayed commands are not re-appended), then attach the append
+	// hook and, for everysec, a background fsync ticker.
+	var aof *persist.AOF
+	if cfg.AOFPath != "" {
+		aof, err = persist.Open(cfg.AOFPath, persist.ParseFsyncPolicy(cfg.AppendFsync))
+		if err != nil {
+			slog.Error("AOF open failed", "path", cfg.AOFPath, "err", err)
+			os.Exit(1)
+		}
+		loaded, err := persist.Load(cfg.AOFPath, reg)
+		if err != nil {
+			aof.Close()
+			slog.Error("AOF load failed", "path", cfg.AOFPath, "err", err)
+			os.Exit(1)
+		}
+		slog.Info("AOF loaded", "path", cfg.AOFPath, "commands_replayed", loaded)
+		reg.SetPropagator(func(args [][]byte) {
+			if err := aof.Append(args); err != nil {
+				slog.Error("AOF append failed", "err", err)
+			}
+		})
+		defer aof.Close()
+		if persist.ParseFsyncPolicy(cfg.AppendFsync) == persist.FsyncEverysec {
+			go func() {
+				ticker := time.NewTicker(time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+						if err := aof.Sync(); err != nil {
+							slog.Error("AOF sync failed", "err", err)
+						}
+					}
+				}
+			}()
+		}
+	}
+
 	srv := server.New(cfg, st, reg, stats)
 
 	expCtx, cancelExp := context.WithCancel(ctx)

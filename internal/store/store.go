@@ -138,6 +138,10 @@ func clamp(n, lo, hi int) int {
 // ShardCount reports the number of shards (for diagnostics/info).
 func (s *Store) ShardCount() int { return len(s.shards) }
 
+// Now returns the store's current time. Used by AOF propagation so absolute
+// deadlines recorded in the log match the store's clock.
+func (s *Store) Now() time.Time { return s.now() }
+
 // shardForBytes returns the shard owning a []byte key using maphash.Bytes
 // (faster than string conversion + maphash.String).
 func (s *Store) shardForBytes(key []byte) *shard {
@@ -592,6 +596,31 @@ func (s *Store) ExpireAt(key []byte, unixSeconds int64) bool {
 	dl := unixSeconds * int64(time.Second)
 	if dl <= s.now().UnixNano() {
 		// Past deadline: Redis deletes the key right away.
+		s.purge(sh, string(key))
+		return true
+	}
+	sh.m[string(key)] = entry{val: e.val, expireAt: dl}
+	s.pushExpiry(string(key), dl)
+	return true
+}
+
+// ExpireAtMs sets an absolute expiry deadline in Unix milliseconds, mirroring
+// Redis PEXPIREAT. A deadline in the past deletes the key immediately.
+// Returns whether the key existed.
+func (s *Store) ExpireAtMs(key []byte, unixMs int64) bool {
+	sh := s.shardForBytes(key)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+
+	e, ok := sh.m[string(key)]
+	if !ok || s.expired(&e) {
+		if ok {
+			s.purge(sh, string(key))
+		}
+		return false
+	}
+	dl := unixMs * int64(time.Millisecond)
+	if dl <= s.now().UnixNano() {
 		s.purge(sh, string(key))
 		return true
 	}

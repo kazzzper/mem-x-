@@ -16,6 +16,13 @@ type Config struct {
 	IdleTimeout  time.Duration
 	TTLTick      time.Duration
 	Shards       int // 0 = auto
+	// AOFPath enables append-only persistence when non-empty. When set, every
+	// write command is appended to this file and the store is rebuilt from it
+	// on startup.
+	AOFPath string
+	// AppendFsync is the fsync policy: "always", "everysec" (default), or
+	// "no". Only consulted when AOFPath is non-empty.
+	AppendFsync string
 }
 
 // Default returns the default configuration.

@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -27,6 +28,10 @@ type Command struct {
 	Name    string
 	MinArgs int
 	MaxArgs int // < 0 means unbounded
+	// Write marks a command that can mutate the store. Write commands are
+	// propagated to the AOF (when one is attached) and, while propagation is
+	// active, serialized under writeMu so the AOF order matches mutation order.
+	Write   bool
 	Handler func(ctx context.Context, args [][]byte) (resp.Reply, error)
 }
 
@@ -45,6 +50,30 @@ type Registry struct {
 	store *store.Store
 	stats *Stats
 	cmds  map[string]Command
+
+	// writeMu serializes write commands while an AOF is attached, so the AOF
+	// order matches the mutation order (reads and non-write commands stay
+	// shard-parallel). Only taken when propagate is non-nil.
+	writeMu sync.Mutex
+	// propagate, when set (by the server wiring), receives each effective
+	// write command for durability (e.g. appended to the AOF).
+	propagate func(args [][]byte)
+}
+
+// SetPropagator installs the durability hook. When fn is nil, write commands
+// run unlocked (full shard parallelism, no persistence).
+func (r *Registry) SetPropagator(fn func(args [][]byte)) { r.propagate = fn }
+
+// propagateCmd forwards one effective write command to the durability hook
+// (if any). Handlers call it only when the write actually mutated the store.
+func (r *Registry) propagateCmd(name string, args ...[]byte) {
+	if r.propagate == nil {
+		return
+	}
+	full := make([][]byte, 0, len(args)+1)
+	full = append(full, []byte(name))
+	full = append(full, args...)
+	r.propagate(full)
 }
 
 // New builds a Registry wired to st and stats. It is called once per server.
@@ -52,32 +81,33 @@ func New(st *store.Store, stats *Stats) *Registry {
 	r := &Registry{store: st, stats: stats, cmds: make(map[string]Command)}
 	r.register(Command{Name: "ping", MinArgs: 0, MaxArgs: 1, Handler: r.hPing})
 	r.register(Command{Name: "echo", MinArgs: 1, MaxArgs: 1, Handler: r.hEcho})
-	r.register(Command{Name: "set", MinArgs: 2, MaxArgs: -1, Handler: r.hSet})
+	r.register(Command{Name: "set", MinArgs: 2, MaxArgs: -1, Write: true, Handler: r.hSet})
 	r.register(Command{Name: "get", MinArgs: 1, MaxArgs: 1, Handler: r.hGet})
-	r.register(Command{Name: "del", MinArgs: 1, MaxArgs: -1, Handler: r.hDel})
+	r.register(Command{Name: "del", MinArgs: 1, MaxArgs: -1, Write: true, Handler: r.hDel})
 	r.register(Command{Name: "exists", MinArgs: 1, MaxArgs: -1, Handler: r.hExists})
-	r.register(Command{Name: "incr", MinArgs: 1, MaxArgs: 1, Handler: r.hIncr})
-	r.register(Command{Name: "decr", MinArgs: 1, MaxArgs: 1, Handler: r.hDecr})
-	r.register(Command{Name: "append", MinArgs: 2, MaxArgs: 2, Handler: r.hAppend})
+	r.register(Command{Name: "incr", MinArgs: 1, MaxArgs: 1, Write: true, Handler: r.hIncr})
+	r.register(Command{Name: "decr", MinArgs: 1, MaxArgs: 1, Write: true, Handler: r.hDecr})
+	r.register(Command{Name: "append", MinArgs: 2, MaxArgs: 2, Write: true, Handler: r.hAppend})
 	r.register(Command{Name: "type", MinArgs: 1, MaxArgs: 1, Handler: r.hType})
-	r.register(Command{Name: "expire", MinArgs: 2, MaxArgs: 2, Handler: r.hExpire})
+	r.register(Command{Name: "expire", MinArgs: 2, MaxArgs: 2, Write: true, Handler: r.hExpire})
+	r.register(Command{Name: "pexpire", MinArgs: 2, MaxArgs: 2, Write: true, Handler: r.hPExpire})
+	r.register(Command{Name: "expireat", MinArgs: 2, MaxArgs: 2, Write: true, Handler: r.hExpireAt})
+	r.register(Command{Name: "pexpireat", MinArgs: 2, MaxArgs: 2, Write: true, Handler: r.hPExpireAt})
+	r.register(Command{Name: "persist", MinArgs: 1, MaxArgs: 1, Write: true, Handler: r.hPersist})
 	r.register(Command{Name: "ttl", MinArgs: 1, MaxArgs: 1, Handler: r.hTTL})
-	r.register(Command{Name: "flushdb", MinArgs: 0, MaxArgs: 0, Handler: r.hFlushDB})
+	r.register(Command{Name: "flushdb", MinArgs: 0, MaxArgs: 0, Write: true, Handler: r.hFlushDB})
 	r.register(Command{Name: "select", MinArgs: 1, MaxArgs: 1, Handler: r.hSelect})
 	r.register(Command{Name: "info", MinArgs: 0, MaxArgs: 0, Handler: r.hInfo})
 	r.register(Command{Name: "command", MinArgs: 0, MaxArgs: 0, Handler: r.hCommand})
 	r.register(Command{Name: "client", MinArgs: 1, MaxArgs: -1, Handler: r.hClient})
 	r.register(Command{Name: "mget", MinArgs: 1, MaxArgs: -1, Handler: r.hMGet})
-	r.register(Command{Name: "mset", MinArgs: 2, MaxArgs: -1, Handler: r.hMSet})
-	r.register(Command{Name: "msetnx", MinArgs: 2, MaxArgs: -1, Handler: r.hMSetNX})
-	r.register(Command{Name: "getset", MinArgs: 2, MaxArgs: 2, Handler: r.hGetSet})
-	r.register(Command{Name: "setnx", MinArgs: 2, MaxArgs: 2, Handler: r.hSetNX})
+	r.register(Command{Name: "mset", MinArgs: 2, MaxArgs: -1, Write: true, Handler: r.hMSet})
+	r.register(Command{Name: "msetnx", MinArgs: 2, MaxArgs: -1, Write: true, Handler: r.hMSetNX})
+	r.register(Command{Name: "getset", MinArgs: 2, MaxArgs: 2, Write: true, Handler: r.hGetSet})
+	r.register(Command{Name: "setnx", MinArgs: 2, MaxArgs: 2, Write: true, Handler: r.hSetNX})
 	r.register(Command{Name: "strlen", MinArgs: 1, MaxArgs: 1, Handler: r.hStrLen})
-	r.register(Command{Name: "incrby", MinArgs: 2, MaxArgs: 2, Handler: r.hIncrBy})
-	r.register(Command{Name: "decrby", MinArgs: 2, MaxArgs: 2, Handler: r.hDecrBy})
-	r.register(Command{Name: "expireat", MinArgs: 2, MaxArgs: 2, Handler: r.hExpireAt})
-	r.register(Command{Name: "pexpire", MinArgs: 2, MaxArgs: 2, Handler: r.hPExpire})
-	r.register(Command{Name: "persist", MinArgs: 1, MaxArgs: 1, Handler: r.hPersist})
+	r.register(Command{Name: "incrby", MinArgs: 2, MaxArgs: 2, Write: true, Handler: r.hIncrBy})
+	r.register(Command{Name: "decrby", MinArgs: 2, MaxArgs: 2, Write: true, Handler: r.hDecrBy})
 	r.register(Command{Name: "keys", MinArgs: 1, MaxArgs: 1, Handler: r.hKeys})
 	r.register(Command{Name: "scan", MinArgs: 1, MaxArgs: -1, Handler: r.hScan})
 	return r
@@ -99,6 +129,19 @@ func (r *Registry) Execute(ctx context.Context, tokens [][]byte) resp.Reply {
 	}
 	if len(cmd.Args) < c.MinArgs || (c.MaxArgs >= 0 && len(cmd.Args) > c.MaxArgs) {
 		return resp.ErrorReply(fmt.Sprintf("ERR wrong number of arguments for '%s' command", cmd.Name))
+	}
+	// When an AOF is attached, serialize write commands so the AOF records
+	// commands in the same order the store mutated (the propagator is invoked
+	// by the handler while this lock is held). Reads and non-write commands
+	// are unaffected and stay shard-parallel.
+	if c.Write && r.propagate != nil {
+		r.writeMu.Lock()
+		reply, err := c.Handler(ctx, cmd.Args)
+		r.writeMu.Unlock()
+		if err != nil {
+			return resp.ErrorReply("ERR " + err.Error())
+		}
+		return reply
 	}
 	reply, err := c.Handler(ctx, cmd.Args)
 	if err != nil {
@@ -186,6 +229,11 @@ func (r *Registry) hSet(ctx context.Context, args [][]byte) (resp.Reply, error) 
 	if !r.store.Set(key, val, ttl, mode) {
 		return resp.NullReply(), nil // NX/XX condition failed
 	}
+	r.propagateCmd("SET", key, val)
+	if ttlSet {
+		absMs := r.store.Now().Add(ttl).UnixMilli()
+		r.propagateCmd("PEXPIREAT", key, []byte(strconv.FormatInt(absMs, 10)))
+	}
 	return resp.SimpleReply("OK"), nil
 }
 
@@ -198,7 +246,11 @@ func (r *Registry) hGet(ctx context.Context, args [][]byte) (resp.Reply, error) 
 }
 
 func (r *Registry) hDel(ctx context.Context, args [][]byte) (resp.Reply, error) {
-	return resp.IntegerReply(int64(r.store.Del(args...))), nil
+	n := r.store.Del(args...)
+	if n > 0 {
+		r.propagateCmd("DEL", args...)
+	}
+	return resp.IntegerReply(int64(n)), nil
 }
 
 func (r *Registry) hExists(ctx context.Context, args [][]byte) (resp.Reply, error) {
@@ -210,6 +262,7 @@ func (r *Registry) hIncr(ctx context.Context, args [][]byte) (resp.Reply, error)
 	if err != nil {
 		return resp.Reply{}, err
 	}
+	r.propagateCmd("INCR", args[0])
 	return resp.IntegerReply(n), nil
 }
 
@@ -218,6 +271,7 @@ func (r *Registry) hDecr(ctx context.Context, args [][]byte) (resp.Reply, error)
 	if err != nil {
 		return resp.Reply{}, err
 	}
+	r.propagateCmd("DECR", args[0])
 	return resp.IntegerReply(n), nil
 }
 
@@ -226,6 +280,7 @@ func (r *Registry) hAppend(ctx context.Context, args [][]byte) (resp.Reply, erro
 	if err != nil {
 		return resp.Reply{}, err
 	}
+	r.propagateCmd("APPEND", args[0], args[1])
 	return resp.IntegerReply(int64(n)), nil
 }
 
@@ -240,9 +295,15 @@ func (r *Registry) hExpire(ctx context.Context, args [][]byte) (resp.Reply, erro
 	}
 	if secs <= 0 {
 		// Redis: a non-positive TTL deletes the key immediately.
-		return resp.IntegerReply(int64(r.store.Del(args[0]))), nil
+		n := r.store.Del(args[0])
+		if n > 0 {
+			r.propagateCmd("DEL", args[0])
+		}
+		return resp.IntegerReply(int64(n)), nil
 	}
 	if r.store.Expire(args[0], time.Duration(secs)*time.Second) {
+		absMs := r.store.Now().Add(time.Duration(secs) * time.Second).UnixMilli()
+		r.propagateCmd("PEXPIREAT", args[0], []byte(strconv.FormatInt(absMs, 10)))
 		return resp.IntegerReply(1), nil
 	}
 	return resp.IntegerReply(0), nil
@@ -265,6 +326,7 @@ func (r *Registry) hTTL(ctx context.Context, args [][]byte) (resp.Reply, error) 
 
 func (r *Registry) hFlushDB(ctx context.Context, args [][]byte) (resp.Reply, error) {
 	r.store.Flush()
+	r.propagateCmd("FLUSHDB")
 	return resp.SimpleReply("OK"), nil
 }
 
@@ -337,6 +399,7 @@ func (r *Registry) hMSet(ctx context.Context, args [][]byte) (resp.Reply, error)
 	for i := 0; i < len(args); i += 2 {
 		r.store.Set(args[i], args[i+1], 0, store.SetAlways)
 	}
+	r.propagateCmd("MSET", args...)
 	return resp.SimpleReply("OK"), nil
 }
 
@@ -351,6 +414,7 @@ func (r *Registry) hMSetNX(ctx context.Context, args [][]byte) (resp.Reply, erro
 		pairs = append(pairs, [2][]byte{args[i], args[i+1]})
 	}
 	if r.store.SetNXMulti(pairs) {
+		r.propagateCmd("MSET", args...)
 		return resp.IntegerReply(1), nil
 	}
 	return resp.IntegerReply(0), nil
@@ -360,6 +424,7 @@ func (r *Registry) hMSetNX(ctx context.Context, args [][]byte) (resp.Reply, erro
 // when the key did not exist). Redis GETSET semantics.
 func (r *Registry) hGetSet(ctx context.Context, args [][]byte) (resp.Reply, error) {
 	old, ok := r.store.GetSet(args[0], args[1])
+	r.propagateCmd("SET", args[0], args[1])
 	if !ok {
 		return resp.NullReply(), nil
 	}
@@ -370,6 +435,7 @@ func (r *Registry) hGetSet(ctx context.Context, args [][]byte) (resp.Reply, erro
 // the key already existed (Redis SETNX semantics; the TTL-less form).
 func (r *Registry) hSetNX(ctx context.Context, args [][]byte) (resp.Reply, error) {
 	if r.store.Set(args[0], args[1], 0, store.SetNX) {
+		r.propagateCmd("SET", args[0], args[1])
 		return resp.IntegerReply(1), nil
 	}
 	return resp.IntegerReply(0), nil
@@ -393,6 +459,7 @@ func (r *Registry) hIncrBy(ctx context.Context, args [][]byte) (resp.Reply, erro
 	if err != nil {
 		return resp.Reply{}, err
 	}
+	r.propagateCmd("INCRBY", args[0], args[1])
 	return resp.IntegerReply(n), nil
 }
 
@@ -406,6 +473,7 @@ func (r *Registry) hDecrBy(ctx context.Context, args [][]byte) (resp.Reply, erro
 	if err != nil {
 		return resp.Reply{}, err
 	}
+	r.propagateCmd("DECRBY", args[0], args[1])
 	return resp.IntegerReply(n), nil
 }
 
@@ -418,6 +486,8 @@ func (r *Registry) hExpireAt(ctx context.Context, args [][]byte) (resp.Reply, er
 		return resp.Reply{}, errors.New("value is not an integer or out of range")
 	}
 	if r.store.ExpireAt(args[0], ts) {
+		absMs := ts * 1000
+		r.propagateCmd("PEXPIREAT", args[0], []byte(strconv.FormatInt(absMs, 10)))
 		return resp.IntegerReply(1), nil
 	}
 	return resp.IntegerReply(0), nil
@@ -430,7 +500,31 @@ func (r *Registry) hPExpire(ctx context.Context, args [][]byte) (resp.Reply, err
 	if err != nil {
 		return resp.Reply{}, errors.New("value is not an integer or out of range")
 	}
+	if ms <= 0 {
+		n := r.store.Del(args[0])
+		if n > 0 {
+			r.propagateCmd("DEL", args[0])
+		}
+		return resp.IntegerReply(int64(n)), nil
+	}
 	if r.store.Expire(args[0], time.Duration(ms)*time.Millisecond) {
+		absMs := r.store.Now().Add(time.Duration(ms) * time.Millisecond).UnixMilli()
+		r.propagateCmd("PEXPIREAT", args[0], []byte(strconv.FormatInt(absMs, 10)))
+		return resp.IntegerReply(1), nil
+	}
+	return resp.IntegerReply(0), nil
+}
+
+// hPExpireAt sets an absolute Unix-millisecond expiry on key. Returns 1 if
+// set, 0 if the key does not exist (Redis PEXPIREAT semantics; a past
+// timestamp deletes the key).
+func (r *Registry) hPExpireAt(ctx context.Context, args [][]byte) (resp.Reply, error) {
+	ms, err := strconv.ParseInt(string(args[1]), 10, 64)
+	if err != nil {
+		return resp.Reply{}, errors.New("value is not an integer or out of range")
+	}
+	if r.store.ExpireAtMs(args[0], ms) {
+		r.propagateCmd("PEXPIREAT", args[0], args[1])
 		return resp.IntegerReply(1), nil
 	}
 	return resp.IntegerReply(0), nil
@@ -440,6 +534,7 @@ func (r *Registry) hPExpire(ctx context.Context, args [][]byte) (resp.Reply, err
 // the key has no TTL or does not exist (Redis PERSIST semantics).
 func (r *Registry) hPersist(ctx context.Context, args [][]byte) (resp.Reply, error) {
 	if r.store.Persist(args[0]) {
+		r.propagateCmd("PERSIST", args[0])
 		return resp.IntegerReply(1), nil
 	}
 	return resp.IntegerReply(0), nil

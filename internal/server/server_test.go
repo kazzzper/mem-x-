@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -13,6 +15,7 @@ import (
 
 	"mem-x/internal/command"
 	"mem-x/internal/config"
+	"mem-x/internal/persist"
 	"mem-x/internal/server"
 	"mem-x/internal/store"
 )
@@ -280,5 +283,86 @@ func TestGracefulShutdown(t *testing.T) {
 	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
 	if _, err := r.ReadByte(); err == nil {
 		t.Fatal("expected closed connection after shutdown")
+	}
+}
+
+// startServerWithAOF boots a server wired with an AOF log at path (mirroring
+// cmd/mem-x main), so its writes are persisted. Returns the bound address.
+func startServerWithAOF(t *testing.T, cfg config.Config, path string) string {
+	t.Helper()
+	st := store.New(store.WithShards(4))
+	stats := command.NewStats()
+	reg := command.New(st, stats)
+
+	aof, err := persist.Open(path, persist.FsyncAlways)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := persist.Load(path, reg); err != nil {
+		t.Fatal(err)
+	}
+	reg.SetPropagator(func(args [][]byte) {
+		if err := aof.Append(args); err != nil {
+			t.Errorf("AOF append failed: %v", err)
+		}
+	})
+	t.Cleanup(func() { _ = aof.Close() })
+
+	srv := server.New(cfg, st, reg, stats)
+	addr, err := srv.Listen(cfg.Addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go srv.Serve(ctx)
+	return addr.String()
+}
+
+// TestAOFServerLifecycle writes through the server with an AOF attached, then
+// proves a fresh server loading the same file rebuilds the exact state.
+func TestAOFServerLifecycle(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "server.aof")
+
+	cfg := config.Default()
+	cfg.Addr = "127.0.0.1:0"
+
+	// --- First server: write some data over the wire. ---
+	addr := startServerWithAOF(t, cfg, path)
+	conn := dial(t, addr)
+	r := bufio.NewReader(conn)
+
+	send(t, conn, "*3\r\n$3\r\nSET\r\n$2\r\nk1\r\n$2\r\nv1\r\n")
+	if got := readLine(t, r); got != "+OK" {
+		t.Fatalf("SET got %q", got)
+	}
+	send(t, conn, "*3\r\n$3\r\nSET\r\n$2\r\nk2\r\n$4\r\n1000\r\n")
+	if got := readLine(t, r); got != "+OK" {
+		t.Fatalf("SET got %q", got)
+	}
+	send(t, conn, "*3\r\n$6\r\nINCRBY\r\n$2\r\nk2\r\n$2\r\n23\r\n")
+	if got := readLine(t, r); got != ":1023" {
+		t.Fatalf("INCRBY got %q", got)
+	}
+	// Prove the AOF file exists and is non-empty.
+	if info, err := os.Stat(path); err != nil || info.Size() == 0 {
+		t.Fatalf("expected a non-empty AOF file, stat err=%v size=%d", err, info.Size())
+	}
+
+	// --- Second server: fresh store, load the same AOF. ---
+	st2 := store.New(store.WithShards(4))
+	reg2 := command.New(st2, command.NewStats())
+	n, err := persist.Load(path, reg2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n == 0 {
+		t.Fatal("expected commands replayed from AOF")
+	}
+	if v, ok := st2.Get([]byte("k1")); !ok || string(v) != "v1" {
+		t.Fatalf("k1 = %q ok=%v, want v1", string(v), ok)
+	}
+	if v, ok := st2.Get([]byte("k2")); !ok || string(v) != "1023" {
+		t.Fatalf("k2 = %q ok=%v, want 1023", string(v), ok)
 	}
 }

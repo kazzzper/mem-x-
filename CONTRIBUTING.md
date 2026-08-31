@@ -181,7 +181,17 @@ git push origin test
 | `-idle-timeout` | 0 | Client idle timeout (0 = none) |
 | `-ttl-tick` | 1s | Expiry sweeper interval |
 | `-shards` | 0 | Store shard count (0 = auto, GOMAXPROCS rounded to power-of-two) |
+| `-aof` | (empty) | Append-only persistence file path (empty = disabled) |
+| `-appendfsync` | `everysec` | AOF fsync policy: `always` \| `everysec` \| `no` |
 | `-log-level` | `info` | Log level: `debug` \| `info` \| `warn` \| `error` (suppress less-important messages) |
+
+**AOF persistence:** with `-aof <path>`, every write command is appended to a
+RESP-format log (relative TTLs rewritten to absolute `PEXPIREAT`), and the log
+is replayed on startup to restore the dataset. `-appendfsync always` fsyncs
+per append (most durable), `everysec` via a background ticker (default), `no`
+lets the OS decide. While AOF is enabled, write commands serialize through a
+global lock in the dispatcher so the log order matches mutation order. See
+`README.md` → Persistence (AOF).
 
 **Port reassignment:** When the requested port is already in use, the server
 automatically retries on the next port(s) (up to 10 attempts). A WARN log

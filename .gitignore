@@ -26,3 +26,6 @@ coverage.*
 # fuzz corpus
 **/testdata/fuzz/
 /memx-cli
+
+# misc
+docs/research/

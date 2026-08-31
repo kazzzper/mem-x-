@@ -137,7 +137,44 @@ writes and read by `Len()` lock-free.
 
 ---
 
-## 6. Edge cases the model absorbs
+## 6. AOF write serialization (when persistence is enabled)
+
+When the AOF is enabled (`-aof <path>`), an additional global lock is brought
+into play to guarantee the AOF log order matches the store mutation order:
+
+```go
+type Registry struct {
+    writeMu sync.Mutex // only taken when AOF is attached
+    propagate func(args [][]byte) // the AOF Append hook
+}
+```
+
+- Every write command (marked `Write: true` in the command table) acquires
+  `writeMu` before the handler runs and releases it after the handler returns
+  and the propagator (AOF `Append`) has been invoked.
+- Non-write commands (reads, PING, INFO, etc.) never touch `writeMu` — they
+  remain fully shard-parallel.
+- When AOF is disabled, `writeMu` is never taken at all: the store is fully
+  shard-parallel for every command.
+
+This is a global serialization point for writes, matching Redis's
+single-threaded execution model. The trade-off is accepted for correctness:
+the AOF must be a faithful linearization of the mutation sequence; no
+concurrent-write ordering can be reconstructed from the shard-per-key order
+alone.
+
+The lock ordering with respect to other locks is:
+
+> **writeMu** (Registry) → **shard lock** (Store) → **expMu** (Store)
+
+Because `writeMu` is always the outermost lock, the existing deadlock-free
+guarantees (shard → expMu) are preserved. The AOF's own internal mutex
+(`aof.mu`) is acquired inside `propagate` while `writeMu` is held, so the
+order is `writeMu → aof.mu`.
+
+---
+
+## 7. Edge cases the model absorbs
 
 | Case | Behavior |
 |------|----------|
@@ -146,6 +183,10 @@ writes and read by `Len()` lock-free.
 | `MSETNX` with an expired-but-present key | Expired key is purged first; batch proceeds (Redis semantics) |
 | `EXPIREAT` with a past timestamp | Key deleted immediately |
 | `PERSIST` on a key with no TTL | Returns 0, key untouched |
+| `SET k v EX 5` then crash before expiry | AOF replays `SET` + absolute `PEXPIREAT`; TTL is exact, not restarted |
+| `SETNX` that fails (key exists) | No write → **not** propagated to AOF |
+| `MSETNX` that fails (any key exists) | No write → **not** propagated to AOF |
+| `EXPIRE` with a non-positive TTL | Deletes key; AOF records a `DEL` (matching the mutation) |
 | `KEYS` / `SCAN` mid-mutation | RLock per shard; a key is never read partially; may be returned twice across a scan (Redis guarantee) |
 | `SCAN` cursor semantics | One shard per call; cursor 0 = done; all keys returned exactly once in the steady-state case |
 | Concurrent `SET EX` + `PERSIST` | Serialized by the shard lock; final state is one of the two, never a torn mix |
@@ -153,7 +194,7 @@ writes and read by `Len()` lock-free.
 
 ---
 
-## 7. What the tests prove
+## 8. What the tests prove
 
 - `make check` runs the whole suite under the race detector (`go test -race
   ./...`).

@@ -48,11 +48,12 @@ make run          # build + listen on :6379
 ```
 
 Server flags: `-addr`, `-max-conn`, `-max-bulk-len`, `-max-value-len`,
-`-max-args`, `-max-inline-len`, `-idle-timeout`, `-ttl-tick`, `-shards`, and
-`-log-level` (`debug|info|warn|error`, default `info`). If the requested port
-is already in use the server transparently reassigns to the next free port
-and logs a WARN with the actual address — a busy default never blocks
-startup. Full table in [`CONTRIBUTING.md`](CONTRIBUTING.md) §6.
+`-max-args`, `-max-inline-len`, `-idle-timeout`, `-ttl-tick`, `-shards`,
+`-aof`, `-appendfsync`, and `-log-level` (`debug|info|warn|error`, default
+`info`). If the requested port is already in use the server transparently
+reassigns to the next free port and logs a WARN with the actual address — a
+busy default never blocks startup. Full table in
+[`CONTRIBUTING.md`](CONTRIBUTING.md) §6.
 
 Smoke test:
 
@@ -102,6 +103,39 @@ session-scoped design:
 For a persistent shared server (survives across sessions), start the
 standalone `./mem-x` yourself and point the CLI at it.
 
+## Persistence (AOF)
+
+mem-x supports **append-only file (AOF) persistence** — every write command is
+appended to a RESP-format file so the dataset can be rebuilt on restart, just
+like Redis AOF.
+
+**Key design decisions:**
+
+- **Correctness first:** when AOF is enabled, write commands are serialized
+  through a global lock so the AOF log order exactly matches the store mutation
+  order. Reads remain shard-parallel (no impact).
+- **Wall-clock independent replay:** relative TTL commands (`EXPIRE`,
+  `PEXPIRE`, `SET EX`/`PX`) are rewritten to absolute `PEXPIREAT` with the
+  deadline computed at execution time, so keys that should have expired during
+  a server outage are still expired on restart.
+- **Fsync policies:** `always` (fsync per append), `everysec` (background
+  ticker, the default), `no` (OS decides).
+- **Embedded CLI server:** the auto-spawned server is ephemeral and does *not*
+  persist — run the standalone `./mem-x` binary for durability.
+
+Enable AOF on startup:
+
+```sh
+./mem-x -aof /var/lib/mem-x/appendonly.aof
+./mem-x -aof data.aof -appendfsync everysec
+```
+
+On restart the file is replayed:
+
+```sh
+./mem-x -aof data.aof          # data is restored automatically
+```
+
 ## Quality gate
 
 ```sh
@@ -124,8 +158,11 @@ CI (`.github/workflows/ci.yml`) runs the quality gate, the full harness,
 The store is a sharded concurrent map (per-shard `sync.RWMutex`, power-of-two
 mask over a per-store `maphash` seed — hash-flooding resistant), with a
 separately locked TTL min-heap, `atomic` counters, and strictly-ascending
-multi-shard lock ordering so deadlock is structurally impossible. Every piece
-is documented in [`docs/CONCURRENCY.md`](docs/CONCURRENCY.md) and enforced by
+multi-shard lock ordering so deadlock is structurally impossible. When the AOF
+is enabled, write commands additionally serialize through a global
+`sync.Mutex` in the command dispatcher so the AOF log order matches the store
+mutation order (Redis itself is single-threaded). Every piece is documented in
+[`docs/CONCURRENCY.md`](docs/CONCURRENCY.md) and enforced by
 `go test -race ./...`.
 
 ## Test
@@ -150,7 +187,7 @@ SETNX GETSET MGET MSET MSETNX`
 
 Expiry:
 
-`EXPIRE EXPIREAT PEXPIRE TTL PERSIST`
+`EXPIRE EXPIREAT PEXPIRE PEXPIREAT TTL PERSIST`
 
 Iteration:
 
