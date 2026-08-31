@@ -138,7 +138,59 @@ understandable.
 
 ---
 
-## 5. Dependency & policy reminders
+## 5. Branch model — test → stage → main
+
+The repository uses three long-lived branches to separate work-in-progress from
+integration and release:
+
+| Branch | Role | Who merges into it |
+|--------|------|--------------------|
+| `test` | Everyday development. All feature work, bug fixes, and experiments land here first. | Pull requests from feature branches |
+| `stage` | Integration / pre-release. Changes from `test` are merged here when they are coherent and pass `make check`. | `git merge test` (after review) |
+| `main` | Working release. Every commit on `main` is a stable, runnable, tested version. | `git merge stage` (after integration validation) |
+
+**Workflow rules:**
+1. **Never commit directly to `main`.** All changes flow through `test` → `stage` → `main`.  
+2. **Commit to `test` frequently** (batched by concern, as described in §4).  
+3. **Merge `test` → `stage`** when a batch of changes is coherent and passes `make check`.  
+4. **Merge `stage` → `main`** only when the state is a working release (all tests pass in race mode, integration tests green, benchmark evidence clean).  
+5. **Hotfixes** go through the same pipeline (no fast-track to `main` unless documented and rare).  
+6. **Tag releases** from `main` with `git tag vX.Y.Z`.
+
+To start working on a new feature:
+
+```sh
+git checkout test
+git pull            # ensure latest from remote (if available)
+# make changes, commit
+git push origin test
+```
+
+---
+
+## 6. Server flags reference
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-addr` | `:6379` | TCP listen address |
+| `-max-conn` | 10000 | Max concurrent client connections |
+| `-max-bulk-len` | 64 MiB | Max bulk string length (bytes) |
+| `-max-value-len` | 512 MiB | Max stored value size (bytes) |
+| `-max-args` | 1 Mi | Max elements per command |
+| `-max-inline-len` | 64 KiB | Max inline command length (bytes) |
+| `-idle-timeout` | 0 | Client idle timeout (0 = none) |
+| `-ttl-tick` | 1s | Expiry sweeper interval |
+| `-shards` | 0 | Store shard count (0 = auto, GOMAXPROCS rounded to power-of-two) |
+| `-log-level` | `info` | Log level: `debug` \| `info` \| `warn` \| `error` (suppress less-important messages) |
+
+**Port reassignment:** When the requested port is already in use, the server
+automatically retries on the next port(s) (up to 10 attempts). A WARN log
+line records the deviation. This is transparent to the client — the server
+binds the first available port. To disable, start on a port that is free.
+
+---
+
+## 7. Dependency & policy reminders
 
 - **Runtime core is stdlib-only** — enforced by `scripts/check-stdlib.sh`
   inside `make check`. If `make check` fails the dep gate, your code imported
