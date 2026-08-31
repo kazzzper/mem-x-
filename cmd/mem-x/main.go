@@ -25,6 +25,22 @@ import (
 
 func main() {
 	cfg := config.Default()
+	// MEMX_* environment variables provide defaults that command-line flags
+	// override. This is the Docker-friendly config surface (see Dockerfile).
+	cfg.Addr = envAddr()
+	cfg.MaxConn = envInt("MEMX_MAX_CONN", cfg.MaxConn)
+	cfg.MaxBulkLen = envInt("MEMX_MAX_BULK_LEN", cfg.MaxBulkLen)
+	cfg.MaxValueLen = envInt64("MEMX_MAX_VALUE_LEN", cfg.MaxValueLen)
+	cfg.MaxArgs = envInt("MEMX_MAX_ARGS", cfg.MaxArgs)
+	cfg.MaxInlineLen = envInt("MEMX_MAX_INLINE_LEN", cfg.MaxInlineLen)
+	cfg.IdleTimeout = envDur("MEMX_IDLE_TIMEOUT", cfg.IdleTimeout)
+	cfg.TTLTick = envDur("MEMX_TTL_TICK", cfg.TTLTick)
+	cfg.Shards = envInt("MEMX_SHARDS", cfg.Shards)
+	cfg.AOFPath = envStr("MEMX_AOF", cfg.AOFPath)
+	cfg.AppendFsync = envStr("MEMX_APPENDFSYNC", cfg.AppendFsync)
+	cfg.TLSCertFile = envStr("MEMX_TLS_CERT", cfg.TLSCertFile)
+	cfg.TLSKeyFile = envStr("MEMX_TLS_KEY", cfg.TLSKeyFile)
+	cfg.RequirePass = envStr("MEMX_PASSWORD", cfg.RequirePass)
 	flag.StringVar(&cfg.Addr, "addr", cfg.Addr, "TCP listen address")
 	flag.IntVar(&cfg.MaxConn, "max-conn", cfg.MaxConn, "max concurrent client connections")
 	flag.IntVar(&cfg.MaxBulkLen, "max-bulk-len", cfg.MaxBulkLen, "max bulk string length in bytes")
@@ -39,7 +55,7 @@ func main() {
 	flag.StringVar(&cfg.TLSCertFile, "tls-cert", cfg.TLSCertFile, "TLS certificate (PEM); enables TLS when set with -tls-key")
 	flag.StringVar(&cfg.TLSKeyFile, "tls-key", cfg.TLSKeyFile, "TLS private key (PEM)")
 	flag.StringVar(&cfg.RequirePass, "requirepass", cfg.RequirePass, "require AUTH <password> on every connection (empty = no auth)")
-	logLevel := flag.String("log-level", "info", "log level: debug|info|warn|error (suppress less-important logs)")
+	logLevel := flag.String("log-level", envStr("MEMX_LOG_LEVEL", "info"), "log level: debug|info|warn|error (suppress less-important logs)")
 	flag.Parse()
 
 	lvl, err := parseLogLevel(*logLevel)
@@ -180,4 +196,59 @@ func listenWithRetry(srv *server.Server, addr string, maxRetries int) (net.Addr,
 // tryListen binds srv to addr and returns the bound address.
 func tryListen(srv *server.Server, addr string) (net.Addr, error) {
 	return srv.Listen(addr)
+}
+
+// env helpers ---------------------------------------------------------------
+
+// envAddr returns the listen address from MEMX_ADDR or MEMX_PORT, falling
+// back to ":6379". MEMX_ADDR takes precedence over MEMX_PORT.
+func envAddr() string {
+	if v := os.Getenv("MEMX_ADDR"); v != "" {
+		return v
+	}
+	if p := os.Getenv("MEMX_PORT"); p != "" {
+		return ":" + p
+	}
+	return ":6379"
+}
+
+// envStr returns the value of env var key, or def when the var is empty.
+func envStr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+// envInt returns the integer value of env var key, or def when the var is
+// empty or not a valid integer.
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+// envInt64 returns the int64 value of env var key, or def when the var is
+// empty or not a valid integer.
+func envInt64(key string, def int64) int64 {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+// envDur returns a time.Duration value of env var key, or def when the var is
+// empty or not a valid duration.
+func envDur(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return def
 }

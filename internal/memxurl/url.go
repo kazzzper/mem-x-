@@ -99,6 +99,45 @@ func (u *URL) Addr() string {
 	return net.JoinHostPort(u.Host, u.Port)
 }
 
+// New assembles a URL from its components, suitable for building connection
+// strings (used by the memx-url tool and tests). An empty port falls back to
+// the scheme default.
+func New(scheme, host, port, user, password string, db int) *URL {
+	if scheme != "memxs" {
+		scheme = "memx"
+	}
+	if port == "" {
+		port = DefaultPort(scheme)
+	}
+	return &URL{
+		Scheme:   scheme,
+		Host:     host,
+		Port:     port,
+		User:     user,
+		Password: password,
+		DB:       db,
+		TLS:      scheme == "memxs",
+	}
+}
+
+// ConnString returns the full connection URL including the password (URL
+// percent-encoded), as opposed to String which masks it. Use this only when
+// the URL is intended for connecting, never for logs or status output.
+func (u *URL) ConnString() string {
+	uu := &neturl.URL{Scheme: u.Scheme, Host: u.Addr()}
+	if u.User != "" || u.Password != "" {
+		if u.Password != "" {
+			uu.User = neturl.UserPassword(u.User, u.Password)
+		} else {
+			uu.User = neturl.User(u.User)
+		}
+	}
+	if u.DB != 0 {
+		uu.Path = strconv.Itoa(u.DB)
+	}
+	return uu.String()
+}
+
 // String reconstructs the canonical URL string (without password for safety
 // when the caller wants to display it).
 func (u *URL) String() string {
