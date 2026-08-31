@@ -10,13 +10,33 @@ external repos allowed for the test harness (AGENTS.md §5).
 sharded store all working, race-clean, and gated (reviewer + security +
 portability). Phase 2 (efficiency) is next.
 
-```
-task → orchestrator → classifier → planner → engineer → testwriter
-     → reviewer → security → bench → portability → done
-```
+## Requirements
 
-See `AGENTS.md` for the agent registry and coding standards; `PLAN.md` for the
-build plan.
+- **Go 1.27+** — the module pins `go 1.27.0` in go.mod.
+- **CGO_ENABLED=0** — the binary builds fully static; no C toolchain needed.
+- **OS/arch** — linux (amd64, arm64), darwin (amd64, arm64), windows (amd64).
+  Cross-compile with `GOOS`/`GOARCH`:
+  ```sh
+  CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o mem-x.exe ./cmd/mem-x
+  ```
+- **Runtime deps: none** — the server binary has zero third-party dependencies.
+  See AGENTS.md §5 for the dependency policy.
+- **Test deps (allowlisted):**
+  - `github.com/redis/go-redis/v9 v9.22.0` — integration harness (MIT)
+  - `github.com/stretchr/testify v1.12.1` — test assertions (MIT)
+  Network access is needed once to download them; after that `GOMODCACHE`
+  (pinned to `.gomodcache/` by the Makefile) avoids re‑downloading.
+- **Build tooling:** `make`, `gofmt`, `go vet`, `govulncheck` (optional).
+
+## Agent system
+
+The repository uses an agent‑based workflow for development. See:
+
+- [`AGENTS.md`](AGENTS.md) — the agent registry, coding standards, dep policy,
+  and workflow.
+- [`agents/`](agents/) — one file per agent with full definition (mission,
+  spawn triggers, output contract, hard rules).
+- [`guidelines.md`](guidelines.md) — how to use the agents day to day.
 
 ## Build & run
 

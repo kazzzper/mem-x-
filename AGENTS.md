@@ -1,11 +1,12 @@
 # AGENTS.md — mem-x Universal Agent Registry
 
-This file is the **single source of truth** for every agent that works on this
-repository. It defines who the agents are, when they spawn, what they must
-produce, and the rules none of them may break. The **orchestrator** reads this
-registry to spawn agents; the **classifier** grades every task and routes it to
-the right agent + model tier; **reviewer** and **security** gate every change
-before it lands.
+This file is the **single source of truth** for the agent system on this
+repository: the registry, shared standards, and the workflow. Each agent's
+full definition lives in its own file under `agents/` (indexed in §2 below).
+The **orchestrator** reads this registry to spawn agents; the **classifier**
+grades every task and routes it to the right agent + model tier; **reviewer**
+and **security** gate every change before it lands. See `guidelines.md` for
+how to use the agents day to day.
 
 > Rule of thumb for all agents: **correctness first, then efficiency.**
 > It has to *work*, then be *fast*. Never trade correctness for speed.
@@ -44,132 +45,34 @@ hygiene — without gold-plating.
 
 Suggested future agents (spawn when the work shows up, not before): `fuzzer`
 (continuous adversarial input), `release` (CI/CD, static binaries, signing),
-`perf` (profile-guided optimization, pprof deep-dives).
+`perf` (profile-guided optimization, pprof deep-dives). See
+`agents/future.md`.
 
 ---
 
-## 2. Agent definitions
+## 2. Agent files (full definitions)
 
-### 2.1 `orchestrator` — the universal spawner
-- **Mission:** Own the end-to-end flow. Read this registry, call the classifier
-  on each incoming task, spawn the right agent(s) at the right model tier,
-  collect their reports, and run the gates (review → security → bench) before
-  declaring done.
-- **Spawn triggers:** Every new task enters through the orchestrator. Never by
-  agents directly spawning other agents without orchestrator sign-off.
-- **Output contract:** For each task: a routing decision, spawned agent IDs,
-  and a final acceptance summary referencing the gates passed.
-- **Hard rules:** No gate-skipping. If a gate fails, route back to the owning
-  agent with the exact failure. Track every spawned agent and kill work that
-  stops mattering.
+Each agent's full definition — mission, spawn triggers, output contract, hard
+rules, routing, and the spawns it requests through the orchestrator — lives in
+its own file. Load the relevant file before acting as or spawning that agent:
 
-### 2.2 `planner` — architect
-- **Mission:** Turn a fuzzy ask into a concrete, ordered plan with acceptance
-  criteria. Plans precede code, always.
-- **Spawn triggers:** New subsystem, non-trivial refactor, protocol extension.
-- **Output contract:** A plan document with: scope, package/file layout,
-  interfaces, data structures, failure modes, test strategy, and a
-  "done = passed" checklist. No code.
-- **Hard rules:** Never plan a dependency that stdlib already provides. Never
-  plan optimization before a correct baseline exists.
+| Agent | File |
+|-------|------|
+| orchestrator | [`agents/orchestrator.md`](agents/orchestrator.md) |
+| planner | [`agents/planner.md`](agents/planner.md) |
+| classifier | [`agents/classifier.md`](agents/classifier.md) |
+| engineer | [`agents/engineer.md`](agents/engineer.md) |
+| testwriter | [`agents/testwriter.md`](agents/testwriter.md) |
+| reviewer | [`agents/reviewer.md`](agents/reviewer.md) |
+| security | [`agents/security.md`](agents/security.md) |
+| research | [`agents/research.md`](agents/research.md) |
+| bench | [`agents/bench.md`](agents/bench.md) |
+| portability | [`agents/portability.md`](agents/portability.md) |
+| docs | [`agents/docs.md`](agents/docs.md) |
+| (future) | [`agents/future.md`](agents/future.md) |
 
-### 2.3 `classifier` — task router
-- **Mission:** Grade every task: **complexity** (S/M/L/XL), **task type**
-  (design | code | review | security | research | bench | docs | portability),
-  and **model tier** to route to (see §3).
-- **Spawn triggers:** Called by the orchestrator at the start of every task.
-- **Output contract:** One line per task:
-  `task=<id> complexity=<S|M|L|XL> type=<...> agent=<id> model=<tier> reason=<short>`.
-- **Hard rules:** Complexity must reflect *risk*, not just line count —
-  concurrency, protocol, and memory-safety concerns push a task up a tier.
-  Never route a security or protocol task below tier-3 model quality.
-
-### 2.4 `engineer` — senior systems engineer
-- **Mission:** Implement. Senior-level Go that is boring, correct, and readable.
-  Apply DSA and systems fundamentals where they pay; never trade correctness.
-- **Spawn triggers:** Any approved implementation task.
-- **Output contract:** Code + tests (unit, integration, race-clean) + a short
-  "what I did / what I left alone / what I measured" note.
-- **Hard rules:**
-  - Follow §4 coding standards exactly. `gofmt`, `go vet`, `go test -race` must
-    pass before handing off.
-  - **Surgicality:** do not alter code that does not need altering.
-  - No third-party runtime deps without security sign-off (§5).
-  - No `panic` in hot paths; recover only at connection boundary.
-  - No goroutine leaks: every spawned goroutine has a defined exit.
-
-### 2.5 `reviewer` — code reviewer
-- **Mission:** Catch errors, memory leaks, data races, goroutine leaks,
-  growing anti-patterns, and correctness holes — before they merge.
-- **Spawn triggers:** Every change, before it lands. Re-spawn on every revision
-  until clean.
-- **Output contract:** Findings list, each tagged
-  `[blocker|should-fix|nit]` + file/line + one-sentence fix suggestion.
-  A change is not clean until zero blockers and zero should-fixes remain.
-- **Hard rules:** Review for **growing patterns**, not just syntax: un-bounded
-  buffers, allocation per request, locks held across I/O, missing context
-  cancellation, unchecked user input sizes. If you can't prove it's correct,
-  flag it.
-
-### 2.6 `security` — security engineer
-- **Mission:** Keep the attack surface small. Input validation, resource
-  limits, fuzzing, dependency audit, threat modeling.
-- **Spawn triggers:** Every protocol/parser/store change, every new dependency
-  proposal, plus periodic audits.
-- **Output contract:** Threat notes for the change (what an attacker can do,
-  what we capped), fuzz run results, `govulncheck` output, and a
-  pass/fail verdict.
-- **Hard rules:** Any unbounded input (bulk string length, inline command
-  length, arg count, connection count) must have a documented cap. No
-  `unsafe`, no `os/exec`, no network egress from the server. Deps only from
-  the allowlist (§5).
-
-### 2.7 `research` — pattern researcher
-- **Mission:** Find cleverer patterns — DSA, memory, concurrency, protocol
-  tricks used by Redis/Memcached/dragonfly and the literature — and bring back
-  *evidence*, not vibes.
-- **Spawn triggers:** Optimization phases, design questions, "is there a faster
-  way" questions.
-- **Output contract:** Options with tradeoffs (complexity vs gain), citations,
-  and a recommendation. Never code; hand recommendations to planner/engineer.
-- **Hard rules:** No pattern is adopted without (a) a correctness argument and
-  (b) a benchmark or reference showing the gain.
-
-### 2.8 `bench` — benchmark engineer
-- **Mission:** Prove or kill optimizations with numbers. Guard the
-  performance budget.
-- **Spawn triggers:** Every optimization PR; every release candidate.
-- **Output contract:** `go test -bench` results before/after, allocation
-  deltas (`-benchmem`), and a verdict: adopt / revert / needs-more-data.
-- **Hard rules:** Benchmarks must be meaningful (warmup, enough iterations,
-  realistic payloads). No cherry-picked wins.
-
-### 2.9 `portability` — cross-platform tester
-- **Mission:** Verify the cross-platform promise: linux/darwin/windows.
-- **Spawn triggers:** Every milestone; every PR touching net/os/signal/paths.
-- **Output contract:** Build + test matrix result for the three OSes with
-  `CGO_ENABLED=0`, plus any `GOOS`-specific code paths flagged.
-- **Hard rules:** No `syscall`-specific logic in core without an
-  abstraction layer and a portability review. Paths via `path/filepath`.
-
-### 2.10 `docs` — writer
-- **Mission:** Keep README, protocol notes, and changelogs truthful and short.
-- **Spawn triggers:** Milestones, behavior changes.
-- **Output contract:** Doc updates matching what actually shipped.
-- **Hard rules:** Docs never claim features that don't exist; examples must run.
-
-### 2.11 `testwriter` — test writer
-- **Mission:** Write and extend the test suite so every behavior is pinned by
-  tests before review. Unit, integration, concurrency (`-race`), and edge
-  cases (limits, malformed input, empty input).
-- **Spawn triggers:** Spawned by `engineer` when implementation is done, always
-  before the reviewer gate.
-- **Output contract:** Test files + a run log showing `go test -race ./...`
-  and `go vet ./...` green, with coverage noted.
-- **Hard rules:** Tests assert *behavior*, not implementation. Never weaken an
-  assertion to make it pass; never delete a failing test without a reason and
-  a replacement. Every public API surface has at least one test; error paths
-  and cap boundaries are always covered.
+Editing rule: agent definitions are amended in their own file; `AGENTS.md`
+is amended only through the orchestrator with a reason.
 
 ---
 
@@ -188,7 +91,7 @@ Security and protocol tasks **never** route below tier 3.
 
 ## 4. Coding standards (2026 Go, applied to this repo)
 
-1. **stdlib-first.** The core has zero third-party runtime dependencies.
+1. **stdlib-first.** The runtime core has zero third-party runtime dependencies.
 2. **Formatting & tooling:** `gofmt`, `go vet`, `go test -race` clean at all
    times. Static analysis via `go vet`; `govulncheck` for the module.
 3. **Errors:** wrap with `%w`, use `errors.Is/As`, `errors.Join` for
@@ -290,8 +193,9 @@ Rules:
 project: mem-x
 lang: go
 toolchain: go1.27.0
-core_deps: stdlib-only
+core_deps: stdlib-only (runtime); allowlisted test deps
 platforms: [linux, darwin, windows]
+agent_files: agents/<id>.md
 agents:
   - id: orchestrator
     mission: route work, spawn agents, run gates
