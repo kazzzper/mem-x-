@@ -94,13 +94,14 @@ Only what Phase 1 benchmarks prove worth it. Candidates (each must come with a
 **Done =** `-benchmem` shows measurable, meaningful gains with no correctness
 regressions; reviewer + bench gates pass.
 
-### Phase 3 — Agent tooling (the meta layer)
-- `classifier` becomes real: a tiny rules engine (`internal/agent` or a
-  standalone `cmd/memx-classify`) that grades a task line →
-  `complexity/type/agent/model-tier` using the §3 tiers, so routing is
-  reproducible and testable.
-- `orchestrator` protocol doc: how spawn requests, reports, and gate results
-  are formatted (JSON lines), so any agent runtime can consume it.
+### Phase 3 — Agent tooling (the meta layer) ✅
+
+- `classifier` became real: `internal/agent` (deterministic rules engine) +
+  `cmd/memx-classify` (CLI). Grades a task line → complexity/type/agent/
+  model-tier using the §3 tiers. Routing is reproducible and testable.
+- `docs/agent-protocol.md` defines the JSON-lines protocol for spawn
+  requests, reports, and gate verdicts.
+- `make classify` / `make build-all` builds the tool.
 
 ### Phase 4 — Security hardening
 - Input caps everywhere (bulk len, inline len, arg count, conn count, command

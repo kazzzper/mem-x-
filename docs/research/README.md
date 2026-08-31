@@ -3,7 +3,7 @@
 Source of truth for grounding agent instructions in real Redis semantics and
 prompt-engineering practice. All files fetched via `curl` (the DeepSeek
 web-search tool is unavailable — the harness `web-search-deepseek` provider
-has no valid `DEEPSEEK_API_KEY`; see `guidelines.md` §8 for the workaround).
+has no valid `DEEPSEEK_API_KEY`; see `guidelines.md` §10 for the workaround).
 
 - `resp-protocol-spec.md` — official Redis serialization protocol spec
   (redis.io/docs/latest/reference/protocol-spec/).

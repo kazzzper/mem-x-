@@ -59,11 +59,25 @@ printf 'SET k v\r\n' | nc 127.0.0.1 6379   # → +OK
 make check       # gofmt + go vet + go test -race + dependency gate
 make harness     # full suite: fmt, vet, race tests with coverage, benchmarks, fuzz
 make fuzz        # 10s RESP parser fuzz
+make classify    # build the classifier tool and show the agent registry
+make build-all   # build the server + classifier binaries
 ```
 
 The dependency gate (`scripts/check-stdlib.sh`) enforces AGENTS.md §5:
 runtime code stays stdlib-only; direct test deps must be on the allowlist
 (currently `github.com/redis/go-redis/v9`, `github.com/stretchr/testify`).
+
+## Test
+
+```sh
+go test -race ./...     # unit + integration (incl. real go-redis client compat)
+```
+
+## Classify a task
+
+```sh
+echo 'implement a new SET command with EX/PX options' | ./memx-classify
+# → task=1 complexity=M type=code agent=engineer model=2 reason=default-code;...
 
 ## Test
 
