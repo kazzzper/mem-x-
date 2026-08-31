@@ -11,7 +11,7 @@ export GOCACHE GOMODCACHE GOPATH
 
 BIN := mem-x
 
-.PHONY: build classify build-all run test vet check fmt bench harness fuzz clean
+.PHONY: build classify build-all release run test vet check fmt bench harness fuzz clean
 
 ## build: compile the server binary (static, CGO disabled)
 build:
@@ -23,6 +23,24 @@ classify: ## Build the classifier tool and show the registry
 
 build-all: build ## Build all binaries
 	CGO_ENABLED=0 go build -trimpath -o memx-classify ./cmd/memx-classify
+
+RELEASE_DIR := dist
+RELEASE_TARGETS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
+
+release: ## Build static binaries for all platforms + checksums
+	@rm -rf $(RELEASE_DIR)
+	@mkdir -p $(RELEASE_DIR)
+	@for target in $(RELEASE_TARGETS); do \
+		os=$${target%/*}; arch=$${target#*/}; \
+		ext=; [ $$os = windows ] && ext=.exe; \
+		bin="mem-x-$$os-$$arch$$ext"; \
+		echo "  building $$target → $(RELEASE_DIR)/$$bin"; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags='-s -w' \
+			-o $(RELEASE_DIR)/$$bin ./cmd/mem-x; \
+		sha256sum $(RELEASE_DIR)/$$bin >> $(RELEASE_DIR)/mem-x-SHA256SUMS; \
+	done
+	@echo "Release checksums written to $(RELEASE_DIR)/mem-x-SHA256SUMS"
+	@ls -lh $(RELEASE_DIR)/
 
 ## run: build and start the server on :6379
 run: build

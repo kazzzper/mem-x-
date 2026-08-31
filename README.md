@@ -61,11 +61,15 @@ make harness     # full suite: fmt, vet, race tests with coverage, benchmarks, f
 make fuzz        # 10s RESP parser fuzz
 make classify    # build the classifier tool and show the agent registry
 make build-all   # build the server + classifier binaries
+make release     # static binaries for 6 platforms + SHA256 checksums under dist/
 ```
 
 The dependency gate (`scripts/check-stdlib.sh`) enforces AGENTS.md §5:
 runtime code stays stdlib-only; direct test deps must be on the allowlist
 (currently `github.com/redis/go-redis/v9`, `github.com/stretchr/testify`).
+
+CI (`.github/workflows/ci.yml`) runs the quality gate, the full harness,
+`govulncheck`, and the release matrix on every push/PR to `main`.
 
 ## Test
 

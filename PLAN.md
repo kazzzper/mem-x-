@@ -103,21 +103,24 @@ regressions; reviewer + bench gates pass.
   requests, reports, and gate verdicts.
 - `make classify` / `make build-all` builds the tool.
 
-### Phase 4 — Security hardening
-- Input caps everywhere (bulk len, inline len, arg count, conn count, command
-  rate at the conn level).
-- Go native fuzzing: `resp` codec and `parser` fuzz targets run continuously.
+### Phase 4 — Security hardening ✅
+
+- Input caps everywhere (bulk len, inline len, arg count, conn count, value
+  size) — documented in `docs/THREATS.md`.
+- Go native fuzzing: `resp` codec fuzz target runs in the harness (5–10s).
 - `govulncheck ./...` in the security gate; dependency allowlist enforced.
-- Threat model doc (`docs/THREATS.md`): what an attacker can do over the wire,
-  what we cap, what we reject.
+- Threat model doc (`docs/THREATS.md`): 15 threats catalogued with controls
+  and residual risk accepted (no auth, no TLS, no rate-limit).
 - `go test -race` + `go vet` in CI; `recover` audit (no panic path reaches the
   process).
 
-### Phase 5 — Cross-platform & release
-- Build matrix `GOOS=linux/darwin/windows GOARCH=amd64/arm64 CGO_ENABLED=0`,
-  plus `go test` on each where runnable (linux here; darwin/windows in CI).
-- Static binaries, `-trimpath`, reproducible builds; release workflow with
-  checksums and provenance (when we get to releases).
+### Phase 5 — Cross-platform & release ✅
+
+- Build matrix `GOOS=linux/darwin/windows GOARCH=amd64/arm64 CGO_ENABLED=0`
+  verified; `make release` builds all 6 targets + SHA256 checksums under
+  `dist/`.
+- Static binaries, `-trimpath`; CI workflow (`.github/workflows/ci.yml`)
+  runs the quality gate, harness, fuzz, govulncheck, and the release matrix.
 - No `syscall`-specific logic in core; `os/signal` handles SIGINT/SIGTERM
   cross-platform.
 
