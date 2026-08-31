@@ -90,8 +90,9 @@ func applyConnOptions(c *cli.Client, t connTarget) error {
 }
 
 func main() {
-	addr := flag.String("addr", "127.0.0.1:6379", "server address: host:port or memx:// URL (auto-spawns if local and unreachable)")
+	addr := flag.String("addr", "127.0.0.1:6379", "server address: host:port or memx:// / memxs:// URL (auto-spawns if plain and local)")
 	timeout := flag.Duration("timeout", 5*time.Second, "connection timeout")
+	tlsSkipVerify := flag.Bool("tls-skip-verify", false, "skip TLS certificate verification (memxs:// only)")
 	flag.Parse()
 
 	// A URL as the first positional argument is the server address; the rest
@@ -108,13 +109,9 @@ func main() {
 		slog.Error("invalid address", "addr", targetArg, "err", err)
 		os.Exit(1)
 	}
-	if t.tls {
-		slog.Error("memxs:// (TLS) is not supported yet")
-		os.Exit(1)
-	}
 
 	connectedAddr := t.dialAddr
-	c, emb, err := dialOrSpawn(t.dialAddr, *timeout)
+	c, emb, err := dialOrSpawn(t, *timeout, *tlsSkipVerify)
 	if err != nil {
 		slog.Error("cannot connect", "addr", targetArg, "err", err)
 		os.Exit(1)
@@ -141,17 +138,22 @@ func main() {
 	runInteractive(c, connectedAddr)
 }
 
-// dialOrSpawn tries to connect to addr. If the connection fails and the addr
-// is local, it starts an embedded mem-x server on that address and re-dials.
-func dialOrSpawn(addr string, timeout time.Duration) (*cli.Client, *cli.Embedded, error) {
-	c, err := cli.Dial(addr, timeout)
+// dialOrSpawn tries to connect to the target. For plain (non-TLS) local
+// targets it auto-spawns an embedded server on failure; for TLS targets it
+// dials directly without auto-spawn (the embedded server is plaintext only).
+func dialOrSpawn(t connTarget, timeout time.Duration, skipVerify bool) (*cli.Client, *cli.Embedded, error) {
+	if t.tls {
+		c, err := cli.DialTLS(t.dialAddr, timeout, skipVerify)
+		return c, nil, err
+	}
+	c, err := cli.Dial(t.dialAddr, timeout)
 	if err == nil {
 		return c, nil, nil
 	}
-	if !cli.IsLocalAddr(addr) {
+	if !cli.IsLocalAddr(t.dialAddr) {
 		return nil, nil, err
 	}
-	emb, serr := cli.StartEmbedded(addr)
+	emb, serr := cli.StartEmbedded(t.dialAddr)
 	if serr != nil {
 		return nil, nil, serr
 	}
