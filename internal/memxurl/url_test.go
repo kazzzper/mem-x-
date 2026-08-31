@@ -126,3 +126,47 @@ func TestIsLocalAddr(t *testing.T) {
 		}
 	}
 }
+
+func TestConnString(t *testing.T) {
+	tests := []struct {
+		name     string
+		scheme   string
+		host     string
+		port     string
+		user     string
+		password string
+		db       int
+		want     string
+	}{
+		{"plain", "memx", "localhost", "", "", "", 0, "memx://localhost:6379"},
+		{"port", "memx", "localhost", "7000", "", "", 0, "memx://localhost:7000"},
+		{"pass", "memx", "localhost", "", "", "secret", 0, "memx://:secret@localhost:6379"},
+		{"user-pass", "memx", "localhost", "", "alice", "secret", 0, "memx://alice:secret@localhost:6379"},
+		{"db", "memx", "localhost", "", "", "", 3, "memx://localhost:6379/3"},
+		{"tls", "memxs", "secure.example", "", "", "s3cret", 2, "memxs://:s3cret@secure.example:6380/2"},
+		{"encoded", "memx", "localhost", "", "alice", "p@ss word", 0, "memx://alice:p%40ss%20word@localhost:6379"},
+	}
+	for _, tt := range tests {
+		u := memxurl.New(tt.scheme, tt.host, tt.port, tt.user, tt.password, tt.db)
+		if got := u.ConnString(); got != tt.want {
+			t.Errorf("%s: ConnString() = %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestNewDefaults(t *testing.T) {
+	u := memxurl.New("", "localhost", "", "", "", 0)
+	if u.Scheme != "memx" {
+		t.Errorf("Scheme = %q, want memx", u.Scheme)
+	}
+	if u.Port != "6379" {
+		t.Errorf("Port = %q, want 6379", u.Port)
+	}
+	u2 := memxurl.New("memxs", "h", "", "", "", 0)
+	if !u2.TLS {
+		t.Error("TLS = false, want true for memxs")
+	}
+	if u2.Port != "6380" {
+		t.Errorf("Port = %q, want 6380", u2.Port)
+	}
+}

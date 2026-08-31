@@ -3,8 +3,16 @@ package server_test
 import (
 	"bufio"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"os"
 	"path/filepath"
@@ -364,5 +372,172 @@ func TestAOFServerLifecycle(t *testing.T) {
 	}
 	if v, ok := st2.Get([]byte("k2")); !ok || string(v) != "1023" {
 		t.Fatalf("k2 = %q ok=%v, want 1023", string(v), ok)
+	}
+}
+
+// writeSelfSignedCert writes a PEM cert + key valid for 127.0.0.1/localhost
+// into t's temp dir and returns both paths.
+func writeSelfSignedCert(t *testing.T) (certFile, keyFile string) {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "localhost"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     []string{"localhost"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	certFile = filepath.Join(dir, "cert.pem")
+	keyFile = filepath.Join(dir, "key.pem")
+	if err := os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certFile, keyFile
+}
+
+func TestServerTLS(t *testing.T) {
+	certFile, keyFile := writeSelfSignedCert(t)
+
+	cfg := config.Default()
+	cfg.Addr = "127.0.0.1:0"
+	cfg.TLSCertFile = certFile
+	cfg.TLSKeyFile = keyFile
+
+	st := store.New(store.WithShards(4))
+	stats := command.NewStats()
+	reg := command.New(st, stats)
+	srv := server.New(cfg, st, reg, stats)
+	if !srv.TLSEnabled() {
+		t.Fatal("TLSEnabled() = false, want true")
+	}
+	addr, err := srv.Listen(cfg.Addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go srv.Serve(ctx)
+
+	// A TLS client with skip-verify (self-signed) must work end to end.
+	tlsCfg := &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}
+	conn, err := tls.Dial("tcp", addr.String(), tlsCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	r := bufio.NewReader(conn)
+	send(t, conn, "*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n")
+	if got := readLine(t, r); got != "+OK" {
+		t.Fatalf("SET got %q", got)
+	}
+	send(t, conn, "*2\r\n$3\r\nGET\r\n$1\r\nk\r\n")
+	if got := readBulk(t, r); got != "v" {
+		t.Fatalf("GET got %q, want v", got)
+	}
+
+	// A plaintext dial must fail the TLS handshake (server speaks TLS only).
+	plain, err := net.Dial("tcp", addr.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	buf := make([]byte, 1)
+	_, err = plain.Read(buf)
+	plain.Close()
+	if err == nil {
+		t.Fatal("expected plaintext read to fail on a TLS-only listener")
+	}
+}
+
+func TestServerTLSPartialConfigFallsBackToPlaintext(t *testing.T) {
+	// Only a cert, no key: the server must still start, plaintext, and log.
+	cfg := config.Default()
+	cfg.Addr = "127.0.0.1:0"
+	cfg.TLSCertFile = "/nonexistent/cert.pem"
+
+	st := store.New(store.WithShards(4))
+	srv := server.New(cfg, st, command.New(st, command.NewStats()), command.NewStats())
+	if srv.TLSEnabled() {
+		t.Fatal("TLSEnabled() = true with a partial TLS config, want false")
+	}
+	addr, err := srv.Listen(cfg.Addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go srv.Serve(ctx)
+
+	conn := dial(t, addr.String())
+	defer conn.Close()
+	r := bufio.NewReader(conn)
+	send(t, conn, "*1\r\n$4\r\nPING\r\n")
+	if got := readLine(t, r); got != "+PONG" {
+		t.Fatalf("PING got %q", got)
+	}
+}
+
+func TestServerRequirePass(t *testing.T) {
+	cfg := config.Default()
+	cfg.Addr = "127.0.0.1:0"
+	cfg.RequirePass = "s3cret"
+	addr := startServer(t, cfg)
+
+	conn := dial(t, addr)
+	defer conn.Close()
+	r := bufio.NewReader(conn)
+
+	// Unauthenticated commands are rejected with NOAUTH.
+	send(t, conn, "*1\r\n$4\r\nPING\r\n")
+	if got := readLine(t, r); got != "-NOAUTH Authentication required." {
+		t.Fatalf("PING pre-auth got %q", got)
+	}
+
+	// Wrong password is rejected.
+	send(t, conn, "*2\r\n$4\r\nAUTH\r\n$9\r\nwrongpass\r\n")
+	if got := readLine(t, r); got != "-WRONGPASS invalid username-password pair or user is disabled." {
+		t.Fatalf("AUTH wrong got %q", got)
+	}
+	// Still not authenticated.
+	send(t, conn, "*1\r\n$4\r\nPING\r\n")
+	if got := readLine(t, r); got != "-NOAUTH Authentication required." {
+		t.Fatalf("PING after wrong AUTH got %q", got)
+	}
+
+	// Correct password unlocks the connection.
+	send(t, conn, "*2\r\n$4\r\nAUTH\r\n$6\r\ns3cret\r\n")
+	if got := readLine(t, r); got != "+OK" {
+		t.Fatalf("AUTH got %q", got)
+	}
+	send(t, conn, "*1\r\n$4\r\nPING\r\n")
+	if got := readLine(t, r); got != "+PONG" {
+		t.Fatalf("PING post-auth got %q", got)
+	}
+
+	// A second connection must authenticate independently.
+	conn2 := dial(t, addr)
+	defer conn2.Close()
+	r2 := bufio.NewReader(conn2)
+	send(t, conn2, "*2\r\n$3\r\nGET\r\n$1\r\nk\r\n")
+	if got := readLine(t, r2); got != "-NOAUTH Authentication required." {
+		t.Fatalf("second conn GET pre-auth got %q", got)
 	}
 }

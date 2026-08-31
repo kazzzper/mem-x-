@@ -183,7 +183,16 @@ git push origin test
 | `-shards` | 0 | Store shard count (0 = auto, GOMAXPROCS rounded to power-of-two) |
 | `-aof` | (empty) | Append-only persistence file path (empty = disabled) |
 | `-appendfsync` | `everysec` | AOF fsync policy: `always` \| `everysec` \| `no` |
+| `-tls-cert` | (empty) | TLS certificate (PEM); with `-tls-key` enables TLS (memxs://) |
+| `-tls-key` | (empty) | TLS private key (PEM) |
+| `-requirepass` | (empty) | Require `AUTH <password>` on every connection (empty = no auth) |
 | `-log-level` | `info` | Log level: `debug` \| `info` \| `warn` \| `error` (suppress less-important messages) |
+
+Every flag has an `MEMX_*` environment variable counterpart used by the Docker
+image (flags override env): `MEMX_ADDR`/`MEMX_PORT`, `MEMX_PASSWORD`,
+`MEMX_TLS_CERT`, `MEMX_TLS_KEY`, `MEMX_AOF`, `MEMX_APPENDFSYNC`,
+`MEMX_LOG_LEVEL`, `MEMX_SHARDS`, `MEMX_MAX_CONN`, etc. `cmd/memx-url` builds a
+percent-encoded `memx://` / `memxs://` connection URL from the same variables.
 
 **AOF persistence:** with `-aof <path>`, every write command is appended to a
 RESP-format log (relative TTLs rewritten to absolute `PEXPIREAT`), and the log

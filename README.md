@@ -62,6 +62,33 @@ printf 'PING\r\n' | nc 127.0.0.1 6379     # → +PONG
 printf 'SET k v\r\n' | nc 127.0.0.1 6379   # → +OK
 ```
 
+## Docker
+
+```sh
+docker compose up -d               # start the server
+docker compose exec memx memx-url   # print the connection URL
+docker compose exec memx memx-cli PING
+```
+
+Configuration via `.env` file (copy `.env.example` → `.env`):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEMX_PORT` | 6379 | Server listen & published port |
+| `MEMX_PASSWORD` | — | Requirepass (AUTH); builds into the URL |
+| `MEMX_TLS` | 0 | 1 = memxs:// (needs cert/key mounts) |
+| `MEMX_AOF` | /data/appendonly.aof | AOF persistence path |
+| `MEMX_LOG_LEVEL` | info | debug|info|warn|error |
+
+The connection URL is built from the **same variables** — port, password, and TLS
+scheme stay in sync between the server and the URL builder. Run `memx-url` in
+the container or locally with the same env to get the exact URL:
+
+```sh
+MEMX_PASSWORD=secret MEMX_PORT=7000 ./memx-url
+# → memx://:secret@localhost:7000
+```
+
 ## memx-cli — the redis-cli-style client
 
 `memx-cli` talks RESP to the server, prints every reply, and reports the
