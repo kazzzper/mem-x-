@@ -23,6 +23,12 @@ type Config struct {
 	// AppendFsync is the fsync policy: "always", "everysec" (default), or
 	// "no". Only consulted when AOFPath is non-empty.
 	AppendFsync string
+	// TLSCertFile and TLSKeyFile enable native TLS when both are set: the
+	// server wraps its listener with tls.NewListener using the PEM cert chain
+	// and private key. Empty (the default) keeps the listener plaintext.
+	// Clients connect with memxs:// URLs.
+	TLSCertFile string
+	TLSKeyFile  string
 }
 
 // Default returns the default configuration.

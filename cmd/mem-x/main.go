@@ -36,6 +36,8 @@ func main() {
 	flag.IntVar(&cfg.Shards, "shards", cfg.Shards, "store shard count (0 = auto)")
 	flag.StringVar(&cfg.AOFPath, "aof", cfg.AOFPath, "append-only persistence file (empty = disabled)")
 	flag.StringVar(&cfg.AppendFsync, "appendfsync", cfg.AppendFsync, "AOF fsync policy: always|everysec|no")
+	flag.StringVar(&cfg.TLSCertFile, "tls-cert", cfg.TLSCertFile, "TLS certificate (PEM); enables TLS when set with -tls-key")
+	flag.StringVar(&cfg.TLSKeyFile, "tls-key", cfg.TLSKeyFile, "TLS private key (PEM)")
 	logLevel := flag.String("log-level", "info", "log level: debug|info|warn|error (suppress less-important logs)")
 	flag.Parse()
 
@@ -108,7 +110,7 @@ func main() {
 		slog.Error("listen failed", "err", err)
 		os.Exit(1)
 	}
-	slog.Info("listening", "addr", addr.String(), "shards", st.ShardCount())
+	slog.Info("listening", "addr", addr.String(), "shards", st.ShardCount(), "tls", srv.TLSEnabled())
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ctx) }()

@@ -7,6 +7,7 @@ package server
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"errors"
 	"io"
 	"log/slog"
@@ -27,10 +28,11 @@ type Server struct {
 	reg   *command.Registry
 	stats *command.Stats
 
-	ln    net.Listener
-	sem   chan struct{} // connection slots
-	conns sync.Map      // net.Conn -> struct{}
-	wg    sync.WaitGroup
+	ln        net.Listener
+	tlsConfig *tls.Config   // non-nil when TLS is enabled
+	sem       chan struct{} // connection slots
+	conns     sync.Map      // net.Conn -> struct{}
+	wg        sync.WaitGroup
 
 	// readerPool/writerPool reuse the per-connection bufio buffers (16 KiB
 	// each). A connection owns its bufio exclusively, so Reset-and-reuse is
@@ -40,17 +42,20 @@ type Server struct {
 	writerPool sync.Pool // *resp.Writer with a 16 KiB buffer
 }
 
-// New returns a Server wired to the given store, registry, and stats.
+// New returns a Server wired to the given store, registry, and stats. When
+// cfg.TLSCertFile and cfg.TLSKeyFile are both set, the listener is wrapped in
+// TLS (clients connect with memxs:// URLs).
 func New(cfg config.Config, st *store.Store, reg *command.Registry, stats *command.Stats) *Server {
 	if cfg.MaxConn < 1 {
 		cfg.MaxConn = 1 // a 0/negative slot count would reject every connection
 	}
 	return &Server{
-		cfg:   cfg,
-		store: st,
-		reg:   reg,
-		stats: stats,
-		sem:   make(chan struct{}, cfg.MaxConn),
+		cfg:       cfg,
+		store:     st,
+		reg:       reg,
+		stats:     stats,
+		sem:       make(chan struct{}, cfg.MaxConn),
+		tlsConfig: loadTLSConfig(cfg.TLSCertFile, cfg.TLSKeyFile),
 		readerPool: sync.Pool{New: func() any {
 			return bufio.NewReaderSize(nil, 16<<10)
 		}},
@@ -60,12 +65,43 @@ func New(cfg config.Config, st *store.Store, reg *command.Registry, stats *comma
 	}
 }
 
+// loadTLSConfig builds a *tls.Config from the cert/key files. It returns nil
+// when neither is set (plaintext). A partial pair (one set, the other empty)
+// or an unreadable pair is logged and also yields nil — the server keeps
+// serving plaintext rather than failing to start.
+func loadTLSConfig(certFile, keyFile string) *tls.Config {
+	if certFile == "" && keyFile == "" {
+		return nil
+	}
+	if certFile == "" || keyFile == "" {
+		slog.Warn("TLS requires both -tls-cert and -tls-key; falling back to plaintext",
+			"cert", certFile, "key", keyFile)
+		return nil
+	}
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		slog.Error("cannot load TLS key pair; falling back to plaintext", "err", err)
+		return nil
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}
+}
+
+// TLSEnabled reports whether the server was configured with a TLS listener.
+func (s *Server) TLSEnabled() bool { return s.tlsConfig != nil }
+
 // Listen binds the server to addr and returns the bound address (useful when
-// addr contains port 0).
+// addr contains port 0). When TLS is enabled the listener is wrapped so every
+// accepted connection performs a TLS handshake.
 func (s *Server) Listen(addr string) (net.Addr, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
+	}
+	if s.tlsConfig != nil {
+		ln = tls.NewListener(ln, s.tlsConfig)
 	}
 	s.ln = ln
 	return ln.Addr(), nil
