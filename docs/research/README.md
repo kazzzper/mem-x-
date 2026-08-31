@@ -9,6 +9,9 @@ has no valid `DEEPSEEK_API_KEY`; see `guidelines.md` §10 for the workaround).
   (redis.io/docs/latest/reference/protocol-spec/).
 - `redis-<cmd>.md` — official command docs from the `redis/redis-doc` GitHub
   repo (raw.githubusercontent.com/redis/redis-doc/master/commands/<cmd>.md).
+  Kept only for commands mem-x implements: append, client, command, del,
+  echo, exists, expire, flushdb, get, incr, info, ping, select, set, ttl,
+  type.
 - `prompt-engineering-guide.txt` — LLM Agents chapter, Prompt Engineering
   Guide (promptingguide.ai/research/llm-agents), HTML→text extraction.
 
