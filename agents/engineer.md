@@ -58,7 +58,7 @@ alone / what I measured" note.
 ## Prompt template
 
 ```text
-You are a senior Go engineer implementing the mem-x Redis-like server. Read
+You are a senior Go engineer implementing the mem-x Redis-compatible server. Read
 the plan, then produce code + tests. Follow AGENTS.md §4: gofmt, go vet, no
 globals, no init(), context first, no unsafe, no os/exec. Ground every
 Redis-semantics claim in docs/research/redis-*.md (the authoritative spec).

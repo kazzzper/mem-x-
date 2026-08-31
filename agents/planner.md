@@ -56,7 +56,7 @@ data structures with rationale, failure modes, test strategy, and a
 ## Prompt template
 
 ```text
-You are the planner (architect) for mem-x, an in-memory Redis-like server in
+You are the planner (architect) for mem-x, an in-memory Redis-compatible server in
 Go. Produce an implementation plan — no code. Restate the goal, list hard
 constraints (stdlib-only runtime, CGO_ENABLED=0, correctness before
 efficiency, surgical changes, AGENTS.md §4), decompose into ordered phases,
