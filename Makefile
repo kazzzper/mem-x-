@@ -11,11 +11,18 @@ export GOCACHE GOMODCACHE GOPATH
 
 BIN := mem-x
 
-.PHONY: build run test vet check fmt bench harness fuzz clean
+.PHONY: build classify build-all run test vet check fmt bench harness fuzz clean
 
 ## build: compile the server binary (static, CGO disabled)
 build:
 	CGO_ENABLED=0 go build -trimpath -o $(BIN) ./cmd/mem-x
+
+classify: ## Build the classifier tool and show the registry
+	CGO_ENABLED=0 go build -trimpath -o memx-classify ./cmd/memx-classify
+	./memx-classify -registry
+
+build-all: build ## Build all binaries
+	CGO_ENABLED=0 go build -trimpath -o memx-classify ./cmd/memx-classify
 
 ## run: build and start the server on :6379
 run: build
@@ -51,5 +58,5 @@ fuzz:
 
 ## clean: remove binaries and local caches
 clean:
-	rm -f $(BIN) $(BIN).exe
+	rm -f $(BIN) $(BIN).exe memx-classify
 	rm -rf .gocache .gomodcache
