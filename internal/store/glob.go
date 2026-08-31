@@ -2,12 +2,12 @@ package store
 
 // GlobMatch reports whether name matches the Redis-style glob pattern.
 // Supported operators:
-//   *         matches any sequence of characters (including empty)
-//   ?         matches any single byte
-//   [abc]     matches one byte in the set
-//   [^abc]    matches one byte NOT in the set
-//   [a-z]     range inside a char class
-//   \x        escapes x (match it literally)
+//   - matches any sequence of characters (including empty)
+//     ?         matches any single byte
+//     [abc]     matches one byte in the set
+//     [^abc]    matches one byte NOT in the set
+//     [a-z]     range inside a char class
+//     \x        escapes x (match it literally)
 //
 // A trailing backslash matches a literal backslash.  An unmatched '[' is
 // treated as a literal (matching Redis behaviour).

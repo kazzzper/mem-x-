@@ -42,9 +42,9 @@ func TestGlobMatch(t *testing.T) {
 		{"[a-z]", "a", true},
 		{"[a-z]", "z", true},
 		{"[a-z]", "aa", false}, // one char
-		{"[^]", "]", true},   // [^] = negated empty class → matches everything
+		{"[^]", "]", true},     // [^] = negated empty class → matches everything
 		{"[^]", "a", true},
-		{"[]", "]", false},   // [] = empty class → matches nothing
+		{"[]", "]", false}, // [] = empty class → matches nothing
 		{"[]", "x", false},
 		// unmatched '[' treated as literal
 		{"[abc", "[abc", true},

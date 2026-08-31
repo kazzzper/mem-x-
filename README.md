@@ -42,9 +42,17 @@ The repository uses an agent‑based workflow for development. See:
 
 ```sh
 make build        # static binary at ./mem-x (CGO_ENABLED=0)
+make build-all    # build the server, memx-cli, and memx-classify binaries
 make run          # build + listen on :6379
-./mem-x -addr 127.0.0.1:7000 -max-conn 5000
+./mem-x -addr 127.0.0.1:7000 -max-conn 5000 -log-level warn
 ```
+
+Server flags: `-addr`, `-max-conn`, `-max-bulk-len`, `-max-value-len`,
+`-max-args`, `-max-inline-len`, `-idle-timeout`, `-ttl-tick`, `-shards`, and
+`-log-level` (`debug|info|warn|error`, default `info`). If the requested port
+is already in use the server transparently reassigns to the next free port
+and logs a WARN with the actual address — a busy default never blocks
+startup. Full table in [`CONTRIBUTING.md`](CONTRIBUTING.md) §6.
 
 Smoke test:
 
@@ -53,6 +61,34 @@ printf 'PING\r\n' | nc 127.0.0.1 6379     # → +PONG
 printf 'SET k v\r\n' | nc 127.0.0.1 6379   # → +OK
 ```
 
+## memx-cli — the redis-cli-style client
+
+`memx-cli` talks RESP to the server, prints every reply, and reports the
+**per-request round-trip latency in ms** on its own line.
+
+```sh
+make build-all                            # produces ./memx-cli
+
+# one-shot mode: command given as arguments
+./memx-cli SET k v                        # → OK
+./memx-cli MGET k missing                 # → 1) "v"  2) (nil)
+./memx-cli -addr 127.0.0.1:7000 KEYS user*
+
+# interactive mode: a prompt, one command per line
+./memx-cli -addr 127.0.0.1:7000
+127.0.0.1:7000> SET k v
+OK
+(0.12 ms)
+127.0.0.1:7000> GET k
+"v"
+(0.09 ms)
+```
+
+Every reply is followed by its ms latency. Server error replies are shown
+redis-cli-style (`(error) ERR ...`); connection problems go to stderr. Type
+`QUIT`/`EXIT` to leave, `HELP` for the brief usage. Quote arguments with
+double quotes and backslash-escape embedded quotes (`ECHO "say \"hi\""`).
+
 ## Quality gate
 
 ```sh
@@ -60,7 +96,6 @@ make check       # gofmt + go vet + go test -race + dependency gate
 make harness     # full suite: fmt, vet, race tests with coverage, benchmarks, fuzz
 make fuzz        # 10s RESP parser fuzz
 make classify    # build the classifier tool and show the agent registry
-make build-all   # build the server + classifier binaries
 make release     # static binaries for 6 platforms + SHA256 checksums under dist/
 ```
 
@@ -70,6 +105,15 @@ runtime code stays stdlib-only; direct test deps must be on the allowlist
 
 CI (`.github/workflows/ci.yml`) runs the quality gate, the full harness,
 `govulncheck`, and the release matrix on every push/PR to `main`.
+
+## Concurrency & locking
+
+The store is a sharded concurrent map (per-shard `sync.RWMutex`, power-of-two
+mask over a per-store `maphash` seed — hash-flooding resistant), with a
+separately locked TTL min-heap, `atomic` counters, and strictly-ascending
+multi-shard lock ordering so deadlock is structurally impossible. Every piece
+is documented in [`docs/CONCURRENCY.md`](docs/CONCURRENCY.md) and enforced by
+`go test -race ./...`.
 
 ## Test
 
@@ -82,15 +126,27 @@ go test -race ./...     # unit + integration (incl. real go-redis client compat)
 ```sh
 echo 'implement a new SET command with EX/PX options' | ./memx-classify
 # → task=1 complexity=M type=code agent=engineer model=2 reason=default-code;...
-
-## Test
-
-```sh
-go test -race ./...     # unit + integration (incl. real go-redis client compat)
 ```
 
 ## Commands implemented
 
-`PING ECHO SET GET DEL EXISTS INCR DECR APPEND TYPE EXPIRE TTL FLUSHDB
-SELECT INFO COMMAND CLIENT` — with Redis-compatible reply and error semantics
-(missing key → null bulk, unknown command with args preview, arity errors).
+Strings & keys:
+
+`PING ECHO SET GET DEL EXISTS INCR DECR INCRBY DECRBY APPEND STRLEN TYPE
+SETNX GETSET MGET MSET MSETNX`
+
+Expiry:
+
+`EXPIRE EXPIREAT PEXPIRE TTL PERSIST`
+
+Iteration:
+
+`KEYS SCAN`
+
+Admin / protocol:
+
+`SELECT INFO COMMAND CLIENT FLUSHDB`
+
+All with Redis-compatible reply and error semantics (missing key → null bulk,
+unknown command with args preview, arity errors, integer-out-of-range and
+syntax errors).
