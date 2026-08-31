@@ -31,6 +31,13 @@ type Server struct {
 	sem   chan struct{} // connection slots
 	conns sync.Map      // net.Conn -> struct{}
 	wg    sync.WaitGroup
+
+	// readerPool/writerPool reuse the per-connection bufio buffers (16 KiB
+	// each). A connection owns its bufio exclusively, so Reset-and-reuse is
+	// safe; the command tokens/bulk buffers are NOT pooled because they escape
+	// into the store as retained values (PLAN.md §3, AGENTS.md §2.7).
+	readerPool sync.Pool // *bufio.Reader with a 16 KiB buffer
+	writerPool sync.Pool // *resp.Writer with a 16 KiB buffer
 }
 
 // New returns a Server wired to the given store, registry, and stats.
@@ -44,6 +51,12 @@ func New(cfg config.Config, st *store.Store, reg *command.Registry, stats *comma
 		reg:   reg,
 		stats: stats,
 		sem:   make(chan struct{}, cfg.MaxConn),
+		readerPool: sync.Pool{New: func() any {
+			return bufio.NewReaderSize(nil, 16<<10)
+		}},
+		writerPool: sync.Pool{New: func() any {
+			return resp.NewWriter(nil)
+		}},
 	}
 }
 
@@ -136,8 +149,12 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		_ = conn.Close()
 	}()
 
-	br := bufio.NewReaderSize(conn, 16<<10)
-	bw := resp.NewWriter(bufio.NewWriterSize(conn, 16<<10))
+	br := s.readerPool.Get().(*bufio.Reader)
+	br.Reset(conn)
+	defer s.readerPool.Put(br)
+	bw := s.writerPool.Get().(*resp.Writer)
+	bw.Reset(conn)
+	defer s.writerPool.Put(bw)
 	lim := resp.Limits{
 		MaxBulkLen:   s.cfg.MaxBulkLen,
 		MaxArgs:      s.cfg.MaxArgs,

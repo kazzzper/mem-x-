@@ -152,6 +152,10 @@ type Writer struct {
 // NewWriter returns a Writer over w.
 func NewWriter(w io.Writer) *Writer { return &Writer{bw: bufio.NewWriter(w)} }
 
+// Reset rebinds w to out, reusing its internal buffer. Used to return a
+// pooled Writer to service without re-allocating the 16 KiB buffer.
+func (w *Writer) Reset(out io.Writer) { w.bw.Reset(out) }
+
 // Flush writes any buffered bytes to the underlying writer.
 func (w *Writer) Flush() error { return w.bw.Flush() }
 
